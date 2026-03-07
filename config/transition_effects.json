@@ -1,0 +1,18 @@
+{
+  "effects": [
+    {
+      "effect_key": "smooth_crossfade",
+      "name": "柔和淡入淡出",
+      "prompt": "在相邻画面之间加入自然、克制、节奏平稳的淡入淡出转场，避免夸张视觉特效，保持房源展示的真实感和专业感。",
+      "sort_order": 10,
+      "is_enabled": true
+    },
+    {
+      "effect_key": "gentle_slide",
+      "name": "轻柔滑动衔接",
+      "prompt": "在相邻画面之间加入轻柔、稳定、不抢主体的滑动式转场，强调镜头连续性与观看流畅度，适合房源空间展示。",
+      "sort_order": 20,
+      "is_enabled": true
+    }
+  ]
+}

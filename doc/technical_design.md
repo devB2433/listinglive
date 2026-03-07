@@ -1,6 +1,6 @@
 # 技术方案 (Technical Design)
 
-**项目名称**: Vivid - 房地产视频生成服务  
+**项目名称**: ListingLive - 房地产视频生成服务  
 **版本**: 1.0  
 **日期**: 2026-03-05
 
@@ -28,7 +28,7 @@
 - Sentry (监控)
 
 ### 第三方服务
-- Volcengine Seedance API (视频生成)
+- Volcengine Ark / Seedance (视频生成)
 - Stripe (支付)
 
 ---
@@ -128,9 +128,9 @@ PUT /api/notifications/:id/read
 
 ### Celery任务
 
-**generate_video_task**: 调用Volcengine API → 轮询状态 → 下载到存储（本地/S3）→ 更新数据库 → 发送通知
+**generate_video_task**: 调用 Ark / Seedance API 创建任务 → 轮询状态 → 下载到存储（本地/S3）→ 更新数据库 → 发送通知
 
-**Reminder**: 正式接入 Seedance 或其他第三方视频模型时，即使对方返回成品视频 URL，也必须先由后端下载回我方存储（当前本地目录，后续可切 S3），再通过我方 `/api/v1/videos/tasks/{id}/download` 等受控接口提供给用户。不要把第三方临时链接直接透传给前端或用户。
+**Reminder**: 当前正式方案已接入 Ark / Seedance。即使第三方返回成品视频 URL，也必须先由后端下载回我方存储（当前本地目录，后续可切 S3），再通过我方 `/api/v1/videos/tasks/{id}/download` 等受控接口提供给用户。不要把第三方临时链接直接透传给前端或用户。
 
 **merge_videos_task**: 等待子视频完成 → 下载 → moviepy合并 → 添加转场和水印 → 上传至存储（本地/S3）→ 通知
 

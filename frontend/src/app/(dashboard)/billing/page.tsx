@@ -8,20 +8,26 @@ import {
   createCustomerPortal,
   createQuotaPackageCheckout,
   createSubscriptionCheckout,
+  getChargeReconciliation,
   getQuotaPackagePlans,
   getSubscriptionPlans,
+  type ChargeReconciliation,
+  type ChargeReconciliationItem,
   type QuotaPackagePlan,
   type SubscriptionPlan,
 } from "@/lib/api";
 import { getAccessTierLabel, getShortDurationSummary, getStorageDaysSummary } from "@/lib/capabilities";
 
 export default function BillingPage() {
-  const { accessToken, quota } = useDashboardSession();
+  const { accessToken, quota, refreshQuota } = useDashboardSession();
   const { formatDate, translate } = useLocale();
   const [subscriptionPlans, setSubscriptionPlans] = useState<SubscriptionPlan[]>([]);
   const [quotaPackagePlans, setQuotaPackagePlans] = useState<QuotaPackagePlan[]>([]);
   const [loadingCatalogs, setLoadingCatalogs] = useState(true);
   const [catalogError, setCatalogError] = useState("");
+  const [reconciliation, setReconciliation] = useState<ChargeReconciliation | null>(null);
+  const [loadingReconciliation, setLoadingReconciliation] = useState(true);
+  const [reconciliationError, setReconciliationError] = useState("");
   const [actionError, setActionError] = useState("");
   const [pendingAction, setPendingAction] = useState<string | null>(null);
 
@@ -30,12 +36,16 @@ export default function BillingPage() {
 
     async function loadCatalogs() {
       setLoadingCatalogs(true);
+      setLoadingReconciliation(true);
       setCatalogError("");
+      setReconciliationError("");
       setActionError("");
 
-      const [plansResult, packagePlansResult] = await Promise.allSettled([
+      const [quotaResult, plansResult, packagePlansResult, reconciliationResult] = await Promise.allSettled([
+        refreshQuota(),
         getSubscriptionPlans(accessToken),
         getQuotaPackagePlans(accessToken),
+        getChargeReconciliation(accessToken, { limit: 20 }),
       ]);
 
       if (cancelled) return;
@@ -46,19 +56,26 @@ export default function BillingPage() {
       if (packagePlansResult.status === "fulfilled") {
         setQuotaPackagePlans(packagePlansResult.value);
       }
+      if (reconciliationResult.status === "fulfilled") {
+        setReconciliation(reconciliationResult.value);
+      } else {
+        setReconciliation(null);
+        setReconciliationError(translate("dashboard.billing.reconciliationLoadFailed"));
+      }
 
-      if (plansResult.status === "rejected" || packagePlansResult.status === "rejected") {
+      if (plansResult.status === "rejected" || packagePlansResult.status === "rejected" || quotaResult.status === "rejected") {
         setCatalogError(translate("dashboard.billing.plansLoadingSlow"));
       }
 
       setLoadingCatalogs(false);
+      setLoadingReconciliation(false);
     }
 
     void loadCatalogs();
     return () => {
       cancelled = true;
     };
-  }, [accessToken, translate]);
+  }, [accessToken, refreshQuota, translate]);
 
   const hasSubscription = Boolean(quota.subscription_plan_type);
 
@@ -160,11 +177,7 @@ export default function BillingPage() {
         <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <InfoPanel
             title={translate("common.accountStatus")}
-            content={`${getAccessTierLabel(translate, quota.access_tier)}. ${
-              quota.access_tier === "signup_bonus"
-                ? translate("dashboard.quotaSummary.signup")
-                : translate("dashboard.billing.currentStatusDescription")
-            }`}
+            content={getAccessTierLabel(translate, quota.access_tier)}
           />
           <InfoPanel
             title={translate("dashboard.billing.signupBonusTitle")}
@@ -189,10 +202,92 @@ export default function BillingPage() {
       </section>
 
       <section className="rounded-2xl border bg-white p-6">
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">{translate("dashboard.billing.reconciliationTitle")}</h2>
+          </div>
+        </div>
+        {reconciliationError ? <p className="mt-4 text-sm text-amber-700">{reconciliationError}</p> : null}
+        {loadingReconciliation ? (
+          <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            {[1, 2, 3, 4].map((item) => (
+              <div key={item} className="rounded-xl border bg-gray-50 p-4">
+                <div className="h-5 w-24 rounded bg-gray-200" />
+                <div className="mt-3 h-8 w-20 rounded bg-gray-200" />
+                <div className="mt-2 h-4 w-28 rounded bg-gray-200" />
+              </div>
+            ))}
+          </div>
+        ) : reconciliation ? (
+          <>
+            <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <StatCard
+                title={translate("dashboard.billing.reconciliationPlannedTotal")}
+                value={String(reconciliation.planned_total)}
+                detail={translate("dashboard.billing.reconciliationPlannedDetail")}
+              />
+              <StatCard
+                title={translate("dashboard.billing.reconciliationChargedTotal")}
+                value={String(reconciliation.charged_total)}
+                detail={translate("dashboard.billing.reconciliationChargedDetail")}
+              />
+              <StatCard
+                title={translate("dashboard.billing.reconciliationPendingReserved")}
+                value={String(reconciliation.pending_reserved_total)}
+                detail={translate("dashboard.billing.reconciliationPendingDetail")}
+              />
+              <StatCard
+                title={translate("dashboard.billing.reconciliationSuccessfulTasks")}
+                value={String(reconciliation.successful_short_tasks + reconciliation.successful_long_tasks)}
+                detail={translate("dashboard.billing.reconciliationSuccessfulDetail", {
+                  short: reconciliation.successful_short_tasks,
+                  long: reconciliation.successful_long_tasks,
+                })}
+              />
+            </div>
+            <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <InfoPanel
+                title={translate("dashboard.billing.reconciliationShortSummary")}
+                content={translate("dashboard.billing.reconciliationShortSummaryValue", {
+                  count: reconciliation.successful_short_tasks,
+                })}
+              />
+              <InfoPanel
+                title={translate("dashboard.billing.reconciliationLongSummary")}
+                content={translate("dashboard.billing.reconciliationLongSummaryValue", {
+                  count: reconciliation.successful_long_tasks,
+                  segments: reconciliation.successful_long_segments,
+                })}
+              />
+              <InfoPanel
+                title={translate("dashboard.billing.reconciliationTaskCount")}
+                content={translate("dashboard.billing.reconciliationTaskCountValue", {
+                  count: reconciliation.total_tasks,
+                })}
+              />
+            </div>
+            <div className="mt-6 rounded-xl border">
+              <div className="border-b bg-gray-50 px-4 py-3">
+                <p className="text-sm font-medium text-gray-900">{translate("dashboard.billing.reconciliationListTitle")}</p>
+              </div>
+              <div className="divide-y">
+                {reconciliation.items.length > 0 ? (
+                  reconciliation.items.map((item) => (
+                    <ChargeItemRow key={item.task_id} item={item} formatDate={formatDate} translate={translate} />
+                  ))
+                ) : (
+                  <div className="px-4 py-4 text-sm text-gray-500">{translate("dashboard.billing.reconciliationEmpty")}</div>
+                )}
+              </div>
+            </div>
+          </>
+        ) : null}
+      </section>
+
+      <section className="rounded-2xl border bg-white p-6">
         <div className="flex items-center justify-between gap-3">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">{translate("dashboard.billing.plansTitle")}</h2>
-            <p className="mt-1 text-sm text-gray-500">{translate("dashboard.billing.plansSubtitle")}</p>
           </div>
         </div>
         {catalogError && <p className="mt-4 text-sm text-amber-700">{catalogError}</p>}
@@ -269,20 +364,7 @@ export default function BillingPage() {
       </section>
 
       <section className="rounded-2xl border bg-white p-6">
-        <h2 className="text-lg font-semibold text-gray-900">{translate("dashboard.billing.plannedTitle")}</h2>
-        <p className="mt-1 text-sm text-gray-500">{translate("dashboard.billing.plannedSubtitle")}</p>
-        <div className="mt-4 rounded-xl border bg-gray-50 p-4">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-base font-semibold text-gray-900">{translate("dashboard.billing.transitionFeatureTitle")}</p>
-            <span className="rounded-full bg-gray-200 px-2 py-1 text-xs text-gray-600">{translate("common.comingSoon")}</span>
-          </div>
-          <p className="mt-2 text-sm text-gray-600">{translate("dashboard.billing.transitionFeatureDescription")}</p>
-        </div>
-      </section>
-
-      <section className="rounded-2xl border bg-white p-6">
         <h2 className="text-lg font-semibold text-gray-900">{translate("dashboard.billing.packagePlansTitle")}</h2>
-        <p className="mt-1 text-sm text-gray-500">{translate("dashboard.billing.packagePlansSubtitle")}</p>
         {loadingCatalogs ? (
           <div className="mt-4 grid gap-4 xl:grid-cols-3">
             {[1, 2, 3].map((item) => (
@@ -355,6 +437,41 @@ function InfoPanel({ title, content }: { title: string; content: string }) {
   );
 }
 
+function ChargeItemRow({
+  item,
+  formatDate,
+  translate,
+}: {
+  item: ChargeReconciliationItem;
+  formatDate: (value: string) => string;
+  translate: (key: string, params?: Record<string, string | number>) => string;
+}) {
+  return (
+    <div className="px-4 py-4">
+      <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-gray-900">
+            {renderBillingTaskType(translate, item.task_type)} · {renderBillingTaskStatus(translate, item.status)}
+          </p>
+          <p className="mt-1 break-all text-xs text-gray-500">{translate("dashboard.billing.reconciliationTaskId", { id: item.task_id })}</p>
+        </div>
+        <div className="text-sm font-medium text-gray-900">
+          {translate("dashboard.billing.reconciliationCreditUsage", {
+            charged: item.charged_quota_consumed,
+            planned: item.planned_quota_consumed,
+          })}
+        </div>
+      </div>
+      <div className="mt-3 grid gap-2 text-sm text-gray-600 md:grid-cols-2 xl:grid-cols-4">
+        <p>{translate("dashboard.billing.reconciliationChargeStatus", { value: renderBillingChargeStatus(translate, item.charge_status) })}</p>
+        <p>{translate("dashboard.billing.reconciliationCreatedAt", { value: formatDate(item.created_at) })}</p>
+        {item.finished_at ? <p>{translate("dashboard.billing.reconciliationFinishedAt", { value: formatDate(item.finished_at) })}</p> : null}
+        {item.charged_at ? <p>{translate("dashboard.billing.reconciliationChargedAt", { value: formatDate(item.charged_at) })}</p> : null}
+      </div>
+    </div>
+  );
+}
+
 function getPlanDisplayName(
   translate: (key: string, vars?: Record<string, string | number>) => string,
   planType: string,
@@ -375,5 +492,36 @@ function getPackageDisplayName(
   if (packageType === "pack_30") return translate("dashboard.billing.packageNamePack30");
   if (packageType === "pack_50") return translate("dashboard.billing.packageNamePack50");
   return fallback;
+}
+
+function renderBillingTaskType(
+  translate: (key: string, vars?: Record<string, string | number>) => string,
+  taskType: string,
+) {
+  if (taskType === "short") return translate("dashboard.tasks.shortType");
+  if (taskType === "long") return translate("dashboard.tasks.longType");
+  return taskType;
+}
+
+function renderBillingTaskStatus(
+  translate: (key: string, vars?: Record<string, string | number>) => string,
+  status: string,
+) {
+  if (status === "queued") return translate("dashboard.tasks.queued");
+  if (status === "processing") return translate("dashboard.tasks.creating");
+  if (status === "merging") return translate("dashboard.tasks.postProcessing");
+  if (status === "succeeded") return translate("dashboard.tasks.completed");
+  if (status === "failed") return translate("dashboard.tasks.failed");
+  return status;
+}
+
+function renderBillingChargeStatus(
+  translate: (key: string, vars?: Record<string, string | number>) => string,
+  status: string,
+) {
+  if (status === "pending") return translate("dashboard.tasks.chargePending");
+  if (status === "charged") return translate("dashboard.tasks.chargeCharged");
+  if (status === "skipped") return translate("dashboard.tasks.chargeSkipped");
+  return status;
 }
 

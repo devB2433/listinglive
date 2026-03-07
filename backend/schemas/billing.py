@@ -73,3 +73,26 @@ class CheckoutSessionOut(BaseModel):
 
 class CustomerPortalOut(BaseModel):
     portal_url: str
+
+
+class TaskChargeReconciliationItemOut(BaseModel):
+    task_id: UUID
+    task_type: str
+    status: str
+    planned_quota_consumed: int
+    charged_quota_consumed: int
+    charge_status: str
+    charged_at: Optional[datetime] = None
+    created_at: datetime
+    finished_at: Optional[datetime] = None
+
+
+class ChargeReconciliationOut(BaseModel):
+    total_tasks: int
+    planned_total: int
+    charged_total: int
+    successful_short_tasks: int
+    successful_long_tasks: int
+    successful_long_segments: int
+    pending_reserved_total: int
+    items: list[TaskChargeReconciliationItemOut]

@@ -1,27 +1,27 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 
 import { useLocale } from "@/components/providers/locale-provider";
 import {
-  createShortVideoTask,
-  getSceneTemplates,
-  getUserLogos,
   type SceneTemplate,
   type UserLogo,
-  uploadVideoAsset,
 } from "@/lib/api";
 import { useDashboardSession } from "@/components/providers/session-provider";
-import { getAccessTierLabel, hasCapability } from "@/lib/capabilities";
+import { getAccessTierLabel } from "@/lib/capabilities";
 import { getSceneTemplateDisplayName } from "@/lib/locale";
+import { createPendingShortVideoDraft } from "@/lib/pending-video-task";
+import { getCachedSceneTemplates, getCachedUserLogos } from "@/lib/video-config-cache";
 
 const ALL_ASPECT_RATIOS = ["16:9", "9:16", "1:1", "adaptive"] as const;
 const ALL_DURATIONS = [2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
 
 export default function VideoCreatePage() {
-  const { accessToken, quota, refreshQuota } = useDashboardSession();
+  const { accessToken, quota } = useDashboardSession();
   const { translate } = useLocale();
+  const router = useRouter();
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const [templates, setTemplates] = useState<SceneTemplate[]>([]);
   const [logos, setLogos] = useState<UserLogo[]>([]);
@@ -39,14 +39,12 @@ export default function VideoCreatePage() {
 
   const fixedDuration = quota.limits.short_fixed_duration_seconds;
   const durationEditable = quota.limits.short_duration_editable;
-  const supportsTransitionEffect = hasCapability(quota, "transition_effect");
-  const selectedTemplate = useMemo(() => templates.find((item) => item.id === sceneTemplateId) || null, [sceneTemplateId, templates]);
   const getTemplateLabel = (template: SceneTemplate) =>
     getSceneTemplateDisplayName(translate, template.template_key, template.name);
 
   useEffect(() => {
     if (bootstrapped) return;
-    Promise.all([getSceneTemplates(accessToken), getUserLogos(accessToken)])
+    Promise.all([getCachedSceneTemplates(accessToken, "short"), getCachedUserLogos(accessToken)])
       .then(([templateData, logoData]) => {
         setTemplates(templateData);
         setLogos(logoData);
@@ -89,19 +87,15 @@ export default function VideoCreatePage() {
     setFormError("");
     setFormMessage("");
     try {
-      const imageUpload = await uploadVideoAsset(accessToken, imageFile, "image");
-      const task = await createShortVideoTask(accessToken, {
-        image_key: imageUpload.key,
+      const draft = createPendingShortVideoDraft({
+        image_file: imageFile,
         scene_template_id: sceneTemplateId,
         resolution,
         aspect_ratio: aspectRatio,
         duration_seconds: durationEditable ? durationSeconds : fixedDuration || durationSeconds,
         logo_key: enableLogo ? selectedLogoKey : null,
       });
-      await refreshQuota();
-      setImageFile(null);
-      if (imageInputRef.current) imageInputRef.current.value = "";
-      setFormMessage(translate("dashboard.shortVideo.createSuccess", { id: task.id }));
+      router.push(`/videos/tasks?draft=${encodeURIComponent(draft.id)}`);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : translate("dashboard.shortVideo.createFailed"));
     } finally {
@@ -119,7 +113,6 @@ export default function VideoCreatePage() {
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div>
             <h2 className="text-lg font-semibold text-gray-900">{translate("dashboard.shortVideo.title")}</h2>
-            <p className="mt-1 text-sm text-gray-500">{translate("dashboard.shortVideo.subtitle")}</p>
           </div>
           <div className="space-y-2 rounded-xl bg-blue-50 px-4 py-3 text-sm text-blue-700">
             <p>{translate("dashboard.shortVideo.totalQuota", { count: quota.total_available })}</p>
@@ -203,11 +196,6 @@ export default function VideoCreatePage() {
                 </option>
               ))}
             </select>
-            {selectedTemplate && (
-              <p className="mt-2 text-sm text-gray-500">
-                {translate("dashboard.shortVideo.templateSelected", { name: getTemplateLabel(selectedTemplate) })}
-              </p>
-            )}
           </div>
 
           <div className="grid gap-4 md:grid-cols-3">
@@ -269,25 +257,6 @@ export default function VideoCreatePage() {
               {translate("dashboard.shortVideo.signupHintTail")}
             </div>
           )}
-
-          <div>
-            <label className="mb-2 block text-sm font-medium text-gray-700">{translate("dashboard.shortVideo.transitionLabel")}</label>
-            <label className="flex items-center gap-2 text-sm text-gray-500">
-              <input type="checkbox" disabled />
-              {translate("dashboard.shortVideo.enableTransition")}
-              <span className="rounded-full bg-gray-200 px-2 py-1 text-xs text-gray-600">
-                {translate("dashboard.billing.transitionPlannedBadge")}
-              </span>
-              {!supportsTransitionEffect && (
-                <span className="rounded-full bg-gray-200 px-2 py-1 text-xs text-gray-600">
-                  {translate("common.notAvailable")}
-                </span>
-              )}
-            </label>
-            <div className="mt-3 rounded-xl border border-gray-200 bg-gray-50 p-4">
-              <p className="text-sm text-gray-600">{translate("dashboard.billing.transitionFeatureDescription")}</p>
-            </div>
-          </div>
 
           {formMessage && <p className="text-sm text-green-600">{formMessage}</p>}
           {formError && <p className="text-sm text-red-600">{formError}</p>}

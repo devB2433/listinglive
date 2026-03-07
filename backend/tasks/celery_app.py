@@ -21,3 +21,15 @@ celery_app.conf.update(
     task_track_started=True,
     worker_prefetch_multiplier=1,
 )
+
+# 定时任务：定期检查异常卡住的任务
+celery_app.conf.beat_schedule = {
+    "reconcile-stale-video-tasks": {
+        "task": "video.reconcile_stale_video_tasks",
+        "schedule": 300.0,  # 每 5 分钟检查一次
+    },
+    "cleanup-expired-video-files": {
+        "task": "video.cleanup_expired_video_files",
+        "schedule": 3600.0,  # 每小时清理过期文件
+    },
+}

@@ -2,13 +2,16 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 
 import { useLocale } from "@/components/providers/locale-provider";
-import { createLongVideoTask, getSceneTemplates, getUserLogos, type SceneTemplate, type UserLogo, uploadVideoAsset } from "@/lib/api";
+import { type SceneTemplate, type UserLogo } from "@/lib/api";
 import { useDashboardSession } from "@/components/providers/session-provider";
-import { getAccessTierLabel, hasCapability, isAdvancedAccess } from "@/lib/capabilities";
+import { getAccessTierLabel, hasCapability } from "@/lib/capabilities";
 import { getSceneTemplateDisplayName } from "@/lib/locale";
+import { createPendingLongVideoDraft } from "@/lib/pending-video-task";
+import { getCachedSceneTemplates, getCachedUserLogos } from "@/lib/video-config-cache";
 
 type EditMode = "unified" | "custom";
 const ALL_ASPECT_RATIOS = ["16:9", "9:16", "1:1", "adaptive"] as const;
@@ -23,14 +26,16 @@ type SegmentDraft = {
 };
 
 export default function VideoMergePage() {
-  const { accessToken, quota, refreshQuota } = useDashboardSession();
+  const { accessToken, quota } = useDashboardSession();
   const { translate } = useLocale();
+  const router = useRouter();
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const [segmentTemplates, setSegmentTemplates] = useState<SceneTemplate[]>([]);
   const [unifiedTemplates, setUnifiedTemplates] = useState<SceneTemplate[]>([]);
   const [logos, setLogos] = useState<UserLogo[]>([]);
   const [bootstrapped, setBootstrapped] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [creatingStage, setCreatingStage] = useState("");
   const [formError, setFormError] = useState("");
   const [formMessage, setFormMessage] = useState("");
   const [segments, setSegments] = useState<SegmentDraft[]>([]);
@@ -45,10 +50,6 @@ export default function VideoMergePage() {
   const [draggingId, setDraggingId] = useState("");
   const latestSegmentsRef = useRef<SegmentDraft[]>([]);
 
-  const selectedUnifiedTemplate = useMemo(
-    () => unifiedTemplates.find((item) => item.id === sceneTemplateId) || null,
-    [sceneTemplateId, unifiedTemplates],
-  );
   const getTemplateLabel = (template: SceneTemplate) =>
     getSceneTemplateDisplayName(translate, template.template_key, template.name);
   const supportsPerImageTemplate = hasCapability(quota, "merge_per_image_template");
@@ -59,25 +60,26 @@ export default function VideoMergePage() {
   const canUseCustomMode = supportsAdvancedLongVideo;
 
   useEffect(() => {
+    if (bootstrapped) return;
     Promise.all([
-      getSceneTemplates(accessToken, { category: "short" }),
-      getSceneTemplates(accessToken, { category: "long_unified" }),
-      getUserLogos(accessToken),
+      getCachedSceneTemplates(accessToken, "short"),
+      getCachedSceneTemplates(accessToken, "long_unified"),
+      getCachedUserLogos(accessToken),
     ])
       .then(([shortTemplateData, unifiedTemplateData, logoData]) => {
         setSegmentTemplates(shortTemplateData);
         setUnifiedTemplates(unifiedTemplateData);
         setLogos(logoData);
-        if (unifiedTemplateData.length > 0) setSceneTemplateId(unifiedTemplateData[0].id);
-        if (shortTemplateData.length > 0) setSegmentTemplateSeedId(shortTemplateData[0].id);
+        if (!sceneTemplateId && unifiedTemplateData.length > 0) setSceneTemplateId(unifiedTemplateData[0].id);
+        if (!segmentTemplateSeedId && shortTemplateData.length > 0) setSegmentTemplateSeedId(shortTemplateData[0].id);
         const defaultLogo = logoData.find((item) => item.is_default) || logoData[0];
-        if (defaultLogo) setSelectedLogoKey(defaultLogo.key);
+        if (!selectedLogoKey && defaultLogo) setSelectedLogoKey(defaultLogo.key);
       })
       .catch((err) => {
         setFormError(err instanceof Error ? err.message : translate("dashboard.longVideo.createFailed"));
       })
       .finally(() => setBootstrapped(true));
-  }, [accessToken, translate]);
+  }, [accessToken, bootstrapped, sceneTemplateId, segmentTemplateSeedId, selectedLogoKey, translate]);
 
   function buildSegmentDraft(file: File, index: number): SegmentDraft {
     return {
@@ -92,14 +94,6 @@ export default function VideoMergePage() {
 
   function revokeSegmentUrls(items: SegmentDraft[]) {
     items.forEach((item) => URL.revokeObjectURL(item.previewUrl));
-  }
-
-  function resetSegments() {
-    if (imageInputRef.current) imageInputRef.current.value = "";
-    setSegments((current) => {
-      revokeSegmentUrls(current);
-      return [];
-    });
   }
 
   function handleFilesSelected(files: File[]) {
@@ -171,13 +165,30 @@ export default function VideoMergePage() {
     }
   }, [durationSeconds, editMode, sceneTemplateId]);
 
+  const prevEditModeRef = useRef<EditMode>(editMode);
+  useEffect(() => {
+    if (prevEditModeRef.current !== "custom" && editMode === "custom" && segmentTemplateSeedId) {
+      setSegments((current) =>
+        current.map((segment) => ({
+          ...segment,
+          sceneTemplateId: segmentTemplateSeedId,
+        })),
+      );
+    }
+    prevEditModeRef.current = editMode;
+  }, [editMode, segmentTemplateSeedId]);
+
   async function handleCreateTask(e: React.FormEvent) {
     e.preventDefault();
     if (segments.length < 2 || segments.length > 10) {
       setFormError(translate("dashboard.longVideo.invalidImageCount"));
       return;
     }
-    if (!sceneTemplateId) {
+    if (editMode === "unified" && !sceneTemplateId) {
+      setFormError(translate("dashboard.longVideo.chooseTemplateFirst"));
+      return;
+    }
+    if (editMode === "custom" && segments.some((s) => !s.sceneTemplateId)) {
       setFormError(translate("dashboard.longVideo.chooseTemplateFirst"));
       return;
     }
@@ -191,39 +202,33 @@ export default function VideoMergePage() {
     }
 
     setCreating(true);
+    setCreatingStage("");
     setFormError("");
     setFormMessage("");
     try {
-      const uploads = await Promise.all(segments.map((segment) => uploadVideoAsset(accessToken, segment.file, "image")));
-      const uploadedKeysBySegmentId = new Map(segments.map((segment, index) => [segment.id, uploads[index].key]));
-      const originalOrderedImageKeys = [...segments]
-        .sort((left, right) => left.sourceIndex - right.sourceIndex)
-        .map((segment) => uploadedKeysBySegmentId.get(segment.id) || "");
       const orderedSegments = editMode === "custom" ? segments : [...segments].sort((left, right) => left.sourceIndex - right.sourceIndex);
       const firstSegment = orderedSegments[0];
-      const task = await createLongVideoTask(accessToken, {
-        image_keys: originalOrderedImageKeys,
+      const draft = createPendingLongVideoDraft({
         scene_template_id: editMode === "custom" ? firstSegment?.sceneTemplateId || sceneTemplateId : sceneTemplateId,
         resolution,
         aspect_ratio: aspectRatio,
         duration_seconds: editMode === "custom" ? firstSegment?.durationSeconds || durationSeconds : durationSeconds,
         logo_key: enableLogo ? selectedLogoKey : null,
-        segments: editMode === "custom"
-          ? orderedSegments.map((segment, index) => ({
-              image_key: uploadedKeysBySegmentId.get(segment.id) || "",
-              scene_template_id: segment.sceneTemplateId,
-              duration_seconds: segment.durationSeconds,
-              sort_order: index,
-            }))
-          : null,
+        edit_mode: editMode,
+        segments: segments.map((segment) => ({
+          id: segment.id,
+          file: segment.file,
+          source_index: segment.sourceIndex,
+          scene_template_id: segment.sceneTemplateId,
+          duration_seconds: segment.durationSeconds,
+        })),
       });
-      await refreshQuota();
-      resetSegments();
-      setFormMessage(translate("dashboard.longVideo.createSuccess", { id: task.id }));
+      router.push(`/videos/tasks?draft=${encodeURIComponent(draft.id)}`);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : translate("dashboard.longVideo.createFailed"));
     } finally {
       setCreating(false);
+      setCreatingStage("");
     }
   }
 
@@ -238,27 +243,17 @@ export default function VideoMergePage() {
   return (
     <div className="space-y-6">
       <div className="rounded-2xl border bg-white p-6">
-        <h2 className="text-lg font-semibold text-gray-900">{translate("dashboard.longVideo.title")}</h2>
-        <p className="mt-2 text-sm text-gray-600">{translate("dashboard.longVideo.subtitle")}</p>
-        <div className="mt-4 rounded-xl border bg-blue-50 p-4 text-sm text-blue-700">
-          {translate("dashboard.header.currentPermission", { value: getAccessTierLabel(translate, quota.access_tier) })}。
-          {isAdvancedAccess(quota) ? translate("dashboard.longVideo.capabilityAdvanced") : translate("dashboard.longVideo.capabilityBasic")}
-        </div>
-      </div>
-
-      <div className="rounded-2xl border bg-white p-6">
-        <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-          <div>
-            <h3 className="text-lg font-semibold text-gray-900">{translate("dashboard.longVideo.createTitle")}</h3>
-            <p className="mt-1 text-sm text-gray-500">{translate("dashboard.longVideo.createSubtitle")}</p>
+        <form onSubmit={handleCreateTask} className="space-y-5">
+          <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">{translate("dashboard.longVideo.createTitle")}</h2>
+            </div>
+            <div className="space-y-2 rounded-xl bg-blue-50 px-4 py-3 text-sm text-blue-700">
+              <p>{translate("dashboard.longVideo.totalQuota", { count: quota.total_available })}</p>
+              <p>{translate("dashboard.header.currentPermission", { value: getAccessTierLabel(translate, quota.access_tier) })}</p>
+            </div>
           </div>
-          <div className="space-y-1 rounded-xl bg-blue-50 px-4 py-3 text-sm text-blue-700">
-            <p>{translate("dashboard.longVideo.totalQuota", { count: quota.total_available })}</p>
-            <p>{translate("dashboard.longVideo.quotaRule")}</p>
-          </div>
-        </div>
 
-        <form onSubmit={handleCreateTask} className="mt-6 space-y-5">
           <div>
             <label className="mb-1 block text-sm font-medium text-gray-700">{translate("dashboard.longVideo.imagesLabel")}</label>
             <input
@@ -354,52 +349,47 @@ export default function VideoMergePage() {
               </button>
             </div>
 
-            <div className="rounded-2xl border bg-gray-50 p-4">
-              <h4 className="font-medium text-gray-900">{translate("dashboard.longVideo.unifiedModeTitle")}</h4>
-              <p className="mt-1 text-sm text-gray-600">{translate("dashboard.longVideo.unifiedModeHint")}</p>
-              <div className="mt-4 grid gap-4 md:grid-cols-2">
-                <div>
-                  <label className="mb-1 block text-sm font-medium text-gray-700">{translate("dashboard.longVideo.unifiedTemplate")}</label>
-                  <select
-                    value={sceneTemplateId}
-                    onChange={(e) => setSceneTemplateId(e.target.value)}
-                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                  >
-                    {unifiedTemplates.map((template) => (
-                      <option key={template.id} value={template.id}>
-                        {getTemplateLabel(template)}
-                      </option>
-                    ))}
-                  </select>
-                  {selectedUnifiedTemplate && (
-                    <p className="mt-2 text-sm text-gray-500">
-                      {translate("dashboard.shortVideo.templateSelected", { name: getTemplateLabel(selectedUnifiedTemplate) })}
-                    </p>
-                  )}
-                </div>
-                <div>
-                  <label className="mb-1 block text-sm font-medium text-gray-700">{translate("dashboard.longVideo.unifiedDuration")}</label>
-                  <select
-                    value={durationSeconds}
-                    onChange={(e) => setDurationSeconds(Number(e.target.value))}
-                    className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-                  >
-                    {[2, 3, 4, 5, 6, 7, 8, 9, 10].map((value) => (
-                      <option key={value} value={value}>
-                        {translate("common.seconds", { value })}
-                      </option>
-                    ))}
-                  </select>
+            {editMode === "unified" && (
+              <div className="rounded-2xl border bg-gray-50 p-4">
+                <h4 className="font-medium text-gray-900">{translate("dashboard.longVideo.unifiedModeTitle")}</h4>
+                <div className="mt-4 grid gap-4 md:grid-cols-2">
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-gray-700">{translate("dashboard.longVideo.unifiedTemplate")}</label>
+                    <select
+                      value={sceneTemplateId}
+                      onChange={(e) => setSceneTemplateId(e.target.value)}
+                      className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                    >
+                      {unifiedTemplates.map((template) => (
+                        <option key={template.id} value={template.id}>
+                          {getTemplateLabel(template)}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-sm font-medium text-gray-700">{translate("dashboard.longVideo.unifiedDuration")}</label>
+                    <select
+                      value={durationSeconds}
+                      onChange={(e) => setDurationSeconds(Number(e.target.value))}
+                      className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+                    >
+                      {[2, 3, 4, 5, 6, 7, 8, 9, 10].map((value) => (
+                        <option key={value} value={value}>
+                          {translate("common.seconds", { value })}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
 
             {editMode === "custom" && (
               <div className={`rounded-2xl border p-4 ${canUseCustomMode ? "bg-gray-50" : "bg-gray-100 opacity-60"}`}>
                 <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                   <div>
                     <h4 className="font-medium text-gray-900">{translate("dashboard.longVideo.segmentEditorTitle")}</h4>
-                    <p className="text-sm text-gray-600">{translate("dashboard.longVideo.segmentEditorSubtitle")}</p>
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <select
@@ -432,9 +422,6 @@ export default function VideoMergePage() {
                     </button>
                   </div>
                 </div>
-                <p className="mt-3 text-xs text-gray-500">
-                  {canUseCustomMode ? translate("dashboard.longVideo.imageOrderHint") : translate("dashboard.longVideo.advancedUnavailable")}
-                </p>
                 <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                   {segments.map((segment, index) => (
                     <div
@@ -516,7 +503,6 @@ export default function VideoMergePage() {
           </div>
 
           <div>
-            <label className="mb-2 block text-sm font-medium text-gray-700">{translate("dashboard.shortVideo.logoLabel")}</label>
             <label className="flex items-center gap-2 text-sm text-gray-700">
               <input type="checkbox" checked={enableLogo} onChange={(e) => setEnableLogo(e.target.checked)} />
               {translate("dashboard.shortVideo.addLogo")}
@@ -569,12 +555,7 @@ export default function VideoMergePage() {
             </div>
           </div>
 
-          {supportsAdvancedLongVideo ? (
-            <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-blue-700">
-              {translate("dashboard.longVideo.advancedAvailable")}
-            </div>
-          ) : null}
-
+          {creatingStage && <p className="text-sm text-blue-600">{creatingStage}</p>}
           {formMessage && <p className="text-sm text-green-600">{formMessage}</p>}
           {formError && <p className="text-sm text-red-600">{formError}</p>}
 
@@ -591,27 +572,6 @@ export default function VideoMergePage() {
             </Link>
           </div>
         </form>
-      </div>
-
-      <div className="rounded-2xl border bg-white p-6">
-        <h3 className="text-base font-semibold text-gray-900">{translate("common.comingSoon")}</h3>
-        <div className="mt-4 grid gap-4 md:grid-cols-2">
-          <div className="rounded-xl border bg-gray-50 p-4 text-sm text-gray-600">
-            <p className="font-medium text-gray-900">{translate("dashboard.longVideo.basicCardTitle")}</p>
-            <p className="mt-2">{translate("dashboard.longVideo.basicCardDesc")}</p>
-          </div>
-          <div className="rounded-xl border bg-gray-50 p-4 text-sm text-gray-600">
-            <p className="font-medium text-gray-900">{translate("dashboard.longVideo.advancedCardTitle")}</p>
-            <p className="mt-2">{translate("dashboard.longVideo.advancedCardDesc")}</p>
-          </div>
-        </div>
-        <div className="mt-4 rounded-xl border bg-gray-50 p-4 text-sm text-gray-600">
-          {translate("dashboard.longVideo.tryShortPrefix")}{" "}
-          <Link href="/videos/create" className="mx-1 text-blue-600 hover:underline">
-            {translate("dashboard.longVideo.tryShortLink")}
-          </Link>
-          {translate("dashboard.longVideo.tryShortSuffix")}
-        </div>
       </div>
     </div>
   );

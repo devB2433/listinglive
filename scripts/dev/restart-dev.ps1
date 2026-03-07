@@ -1,6 +1,7 @@
 param(
   [int]$BackendPort = 8003,
-  [int]$FrontendPort = 3001
+  [int]$FrontendPort = 3001,
+  [int]$WorkerCount = 8
 )
 
 $ErrorActionPreference = 'Stop'
@@ -72,21 +73,29 @@ New-Item -ItemType Directory -Force $runtimeDir | Out-Null
 
 $backendOut = Join-Path $runtimeDir 'backend.out.log'
 $backendErr = Join-Path $runtimeDir 'backend.err.log'
-$workerOut = Join-Path $runtimeDir 'worker.out.log'
-$workerErr = Join-Path $runtimeDir 'worker.err.log'
 $frontendOut = Join-Path $runtimeDir 'frontend.out.log'
 $frontendErr = Join-Path $runtimeDir 'frontend.err.log'
 
 Reset-LogFile $backendOut
 Reset-LogFile $backendErr
-Reset-LogFile $workerOut
-Reset-LogFile $workerErr
+Get-ChildItem $runtimeDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'worker*.log' } | ForEach-Object {
+  Reset-LogFile $_.FullName
+}
 Reset-LogFile $frontendOut
 Reset-LogFile $frontendErr
 
 $env:PYTHONPATH = $root
 Start-Process python -ArgumentList '-m','uvicorn','backend.main:app','--host','127.0.0.1','--port',$BackendPort -WorkingDirectory $root -RedirectStandardOutput $backendOut -RedirectStandardError $backendErr | Out-Null
-Start-Process python -ArgumentList '-m','celery','-A','backend.tasks.celery_app','worker','-l','info','-P','solo' -WorkingDirectory $root -RedirectStandardOutput $workerOut -RedirectStandardError $workerErr | Out-Null
+for ($workerIndex = 1; $workerIndex -le $WorkerCount; $workerIndex++) {
+  $workerOut = if ($workerIndex -eq 1) { Join-Path $runtimeDir 'worker.out.log' } else { Join-Path $runtimeDir "worker-$workerIndex.out.log" }
+  $workerErr = if ($workerIndex -eq 1) { Join-Path $runtimeDir 'worker.err.log' } else { Join-Path $runtimeDir "worker-$workerIndex.err.log" }
+  Start-Process python -ArgumentList '-m','celery','-A','backend.tasks.celery_app','worker','-l','info','-P','solo','-n',"listinglive-worker-$workerIndex@%h" -WorkingDirectory $root -RedirectStandardOutput $workerOut -RedirectStandardError $workerErr | Out-Null
+}
+$beatOut = Join-Path $runtimeDir 'beat.out.log'
+$beatErr = Join-Path $runtimeDir 'beat.err.log'
+Reset-LogFile $beatOut
+Reset-LogFile $beatErr
+Start-Process python -ArgumentList '-m','celery','-A','backend.tasks.celery_app','beat','-l','info' -WorkingDirectory $root -RedirectStandardOutput $beatOut -RedirectStandardError $beatErr | Out-Null
 Start-Process npm.cmd -ArgumentList 'run','dev:fixed' -WorkingDirectory (Join-Path $root 'frontend') -RedirectStandardOutput $frontendOut -RedirectStandardError $frontendErr | Out-Null
 
 Wait-HttpReady "http://127.0.0.1:$BackendPort/health"
@@ -94,6 +103,6 @@ Wait-HttpReady "http://localhost:$FrontendPort"
 Start-Sleep -Seconds 2
 
 Write-Host "Backend: http://127.0.0.1:$BackendPort"
-Write-Host "Worker: celery -A backend.tasks.celery_app worker -l info -P solo"
+Write-Host "Workers: $WorkerCount x celery worker | Beat: celery beat (每 5 分钟检查异常任务)"
 Write-Host "Frontend: http://localhost:$FrontendPort"
 Write-Host "Logs: $runtimeDir"

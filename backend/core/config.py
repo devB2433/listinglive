@@ -48,16 +48,37 @@ class Settings(BaseSettings):
     TRANSITION_EFFECT_CONFIG_PATH: str = "config/transition_effects.json"
 
     # 视频生成
-    VIDEO_PROVIDER: str = "local"
+    VIDEO_PROVIDER: str = "seedance"
     VIDEO_DEFAULT_MODEL: str = "doubao-seedance-1-0-pro-fast-251015"
     VIDEO_POLL_INTERVAL_SECONDS: int = 5
     VIDEO_MAX_POLL_SECONDS: int = 300
-    VIDEO_FPS: int = 12
+    VIDEO_FPS: int = 24
     VIDEO_GENERATE_TIMEOUT_SECONDS: int = 600
     VIDEO_MERGE_TIMEOUT_SECONDS: int = 900
     VIDEO_TASK_STALE_SECONDS: int = 1800
+    VIDEO_TASK_STALE_STARTUP_SECONDS: int = 120  # 启动时用更短阈值，快速识别因重启而孤儿化的任务
     VIDEO_EXPIRED_CLEANUP_BATCH_SIZE: int = 100
+    VIDEO_PROVIDER_MAX_RETRIES: int = 2
+    VIDEO_PROVIDER_RETRY_BACKOFF_SECONDS: int = 5
+    VIDEO_PROVIDER_CONCURRENCY_LIMIT: int = 8
+    VIDEO_PROVIDER_CONCURRENCY_WAIT_SECONDS: int = 60
+    VIDEO_PROVIDER_QUEUE_HEARTBEAT_SECONDS: int = 15
+    ARK_PROFILE: str = "test"
+    ARK_API_KEY: str | None = None
+    ARK_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
+    ARK_VIDEO_MODEL_ID: str | None = None
+    ARK_PRODUCTION_API_KEY: str | None = None
+    ARK_PRODUCTION_VIDEO_MODEL_ID: str = "ep-20260307215031-lgmpq"
+    ARK_TEST_API_KEY: str | None = None
+    ARK_TEST_VIDEO_MODEL_ID: str = "ep-20260307234310-k24x7"
+    ARK_HTTP_TIMEOUT_SECONDS: int = 60
+    ARK_TRANSPORT: str = "rest"
+    ARK_REQUEST_STYLE: str = "prompt_flags"
+    ARK_CAMERA_FIXED: bool = False
+    ARK_PROVIDER_WATERMARK: bool = False
     SEEDANCE_API_KEY: str | None = None
+    ARK_DOWNLOAD_TIMEOUT_SECONDS: int = 300
+    SEEDANCE_DOWNLOAD_TIMEOUT_SECONDS: int = 300
 
     # 验证码
     VERIFY_CODE_EXPIRE_SECONDS: int = 300
@@ -92,6 +113,28 @@ class Settings(BaseSettings):
     def TRANSITION_EFFECT_CONFIG_FILE(self) -> Path:
         path = Path(self.TRANSITION_EFFECT_CONFIG_PATH)
         return path if path.is_absolute() else _PROJECT_ROOT / path
+
+    @property
+    def ACTIVE_ARK_API_KEY(self) -> str | None:
+        if self.ARK_API_KEY:
+            return self.ARK_API_KEY
+        profile = self.ARK_PROFILE.lower()
+        if profile == "production":
+            return self.ARK_PRODUCTION_API_KEY
+        if profile == "test":
+            return self.ARK_TEST_API_KEY
+        return None
+
+    @property
+    def ACTIVE_ARK_VIDEO_MODEL_ID(self) -> str:
+        if self.ARK_VIDEO_MODEL_ID:
+            return self.ARK_VIDEO_MODEL_ID
+        profile = self.ARK_PROFILE.lower()
+        if profile == "production":
+            return self.ARK_PRODUCTION_VIDEO_MODEL_ID
+        if profile == "test":
+            return self.ARK_TEST_VIDEO_MODEL_ID
+        return self.ARK_PRODUCTION_VIDEO_MODEL_ID
 
 
 @lru_cache

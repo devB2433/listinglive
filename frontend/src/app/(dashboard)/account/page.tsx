@@ -1,14 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useLocale } from "@/components/providers/locale-provider";
 import { useDashboardSession } from "@/components/providers/session-provider";
-import { deleteLogo, getUserLogos, setDefaultLogo, type UserLogo, uploadVideoAsset } from "@/lib/api";
+import { deleteLogo, setDefaultLogo, type UserLogo, uploadVideoAsset } from "@/lib/api";
+import { getCachedUserLogos, invalidateUserLogosCache } from "@/lib/video-config-cache";
 
 export default function AccountPage() {
   const { accessToken, user } = useDashboardSession();
   const { translate } = useLocale();
+  const logoInputRef = useRef<HTMLInputElement | null>(null);
   const [logos, setLogos] = useState<UserLogo[]>([]);
   const [logoFile, setLogoFile] = useState<File | null>(null);
   const [logoName, setLogoName] = useState("");
@@ -19,13 +21,13 @@ export default function AccountPage() {
   const [error, setError] = useState("");
 
   useEffect(() => {
-    getUserLogos(accessToken)
+    getCachedUserLogos(accessToken)
       .then(setLogos)
       .finally(() => setLoading(false));
   }, [accessToken]);
 
   async function reloadLogos() {
-    const latestLogos = await getUserLogos(accessToken);
+    const latestLogos = await getCachedUserLogos(accessToken, { force: true });
     setLogos(latestLogos);
   }
 
@@ -44,9 +46,13 @@ export default function AccountPage() {
     setMessage("");
     try {
       await uploadVideoAsset(accessToken, logoFile, "logo", { name: logoName.trim() });
+      invalidateUserLogosCache(accessToken);
       await reloadLogos();
       setLogoFile(null);
       setLogoName("");
+      if (logoInputRef.current) {
+        logoInputRef.current.value = "";
+      }
       setMessage(translate("dashboard.accountPage.logoUploadSuccess"));
     } catch (err) {
       setError(err instanceof Error ? err.message : translate("dashboard.accountPage.logoUploadFailed"));
@@ -61,6 +67,7 @@ export default function AccountPage() {
     setMessage("");
     try {
       await setDefaultLogo(accessToken, logoId);
+      invalidateUserLogosCache(accessToken);
       await reloadLogos();
       setMessage(translate("dashboard.accountPage.defaultUpdated"));
     } catch (err) {
@@ -76,6 +83,7 @@ export default function AccountPage() {
     setMessage("");
     try {
       await deleteLogo(accessToken, logoId);
+      invalidateUserLogosCache(accessToken);
       await reloadLogos();
       setMessage(translate("dashboard.accountPage.logoDeleted"));
     } catch (err) {
@@ -105,10 +113,9 @@ export default function AccountPage() {
       </section>
       <section className="rounded-2xl border bg-white p-6">
         <h2 className="text-lg font-semibold text-gray-900">{translate("dashboard.accountPage.logoTitle")}</h2>
-        <p className="mt-1 text-sm text-gray-500">{translate("dashboard.accountPage.logoSubtitle")}</p>
 
         <div className="mt-4 rounded-xl border bg-gray-50 p-4">
-          <label className="mb-1 block text-sm font-medium text-gray-700">{translate("dashboard.accountPage.uploadNewLogo")}</label>
+          <label className="mb-1 block text-sm font-medium text-gray-700">{translate("dashboard.accountPage.logoNameLabel")}</label>
           <input
             type="text"
             value={logoName}
@@ -117,19 +124,27 @@ export default function AccountPage() {
             placeholder={translate("dashboard.accountPage.logoNamePlaceholder")}
           />
           <input
+            ref={logoInputRef}
             type="file"
             accept="image/png,image/jpeg,image/webp"
             onChange={(e) => setLogoFile(e.target.files?.[0] || null)}
-            className="block w-full text-sm text-gray-700"
+            className="hidden"
           />
           <div className="mt-3 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => logoInputRef.current?.click()}
+              className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700 hover:bg-blue-100"
+            >
+              {translate("common.uploadLogo")}
+            </button>
             <button
               type="button"
               onClick={() => void handleUploadLogo()}
               disabled={uploading || !logoFile}
               className="rounded-md border px-3 py-2 text-sm text-blue-600 hover:bg-blue-50 disabled:opacity-50"
             >
-              {uploading ? translate("common.uploading") : translate("common.uploadLogo")}
+              {uploading ? translate("common.uploading") : translate("dashboard.accountPage.confirmUpload")}
             </button>
             <p className="text-xs text-gray-500">
               {logoFile

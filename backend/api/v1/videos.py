@@ -27,12 +27,15 @@ from backend.services.entitlement_service import PermissionDeniedError
 from backend.services.video_service import (
     create_long_video_task,
     create_short_video_task,
+    cleanup_storage_keys_best_effort,
     delete_logo_asset,
     enqueue_video_task_or_fail,
     get_video_task_for_user,
+    list_long_segments_for_task_ids,
     list_scene_templates,
     list_user_logos,
     list_video_tasks_for_user,
+    retry_long_video_task,
     save_image_upload,
     set_default_logo,
     to_video_task_list_item,
@@ -188,7 +191,9 @@ async def list_tasks(
     db: AsyncSession = Depends(get_db),
 ) -> list[VideoTaskListItem]:
     tasks = await list_video_tasks_for_user(db, user.id, status=status, task_type=task_type, limit=limit)
-    return [to_video_task_list_item(task) for task in tasks]
+    long_task_ids = [task.id for task in tasks if task.task_type == "long"]
+    segments_by_task_id = await list_long_segments_for_task_ids(db, long_task_ids)
+    return [to_video_task_list_item(task, long_segments=segments_by_task_id.get(task.id)) for task in tasks]
 
 
 @router.get("/tasks/{task_id}", response_model=VideoTaskOut)
@@ -200,7 +205,28 @@ async def get_task(
     task = await get_video_task_for_user(db, user.id, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
-    return to_video_task_out(task)
+    segments_by_task_id = await list_long_segments_for_task_ids(db, [task.id] if task.task_type == "long" else [])
+    return to_video_task_out(task, long_segments=segments_by_task_id.get(task.id))
+
+
+@router.post("/tasks/{task_id}/retry", response_model=VideoTaskOut)
+async def retry_task(
+    task_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> VideoTaskOut:
+    try:
+        task, cleanup_keys = await retry_long_video_task(db, user_id=user.id, task_id=task_id)
+        await db.commit()
+        await db.refresh(task)
+        await cleanup_storage_keys_best_effort(cleanup_keys)
+        await enqueue_video_task_or_fail(db, task=task, enqueue_fn=process_long_video_task_job.delay)
+        segments_by_task_id = await list_long_segments_for_task_ids(db, [task.id])
+        return to_video_task_out(task, long_segments=segments_by_task_id.get(task.id))
+    except AppError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @router.get("/tasks/{task_id}/download")

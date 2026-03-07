@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { useLocale } from "@/components/providers/locale-provider";
@@ -11,6 +11,7 @@ import {
   type UserProfile,
 } from "@/lib/api";
 import { clearStoredTokens, getStoredAccessToken } from "@/lib/session";
+import { warmVideoConfigCache } from "@/lib/video-config-cache";
 
 const EMPTY_QUOTA: QuotaSnapshot = {
   subscription_plan_type: null,
@@ -48,6 +49,7 @@ const DashboardSessionContext = createContext<DashboardSessionContextValue | nul
 export function DashboardSessionProvider({ children }: Readonly<{ children: React.ReactNode }>) {
   const router = useRouter();
   const { translate } = useLocale();
+  const sessionInitializedRef = useRef(false);
   const [loading, setLoading] = useState(true);
   const [accessToken, setAccessToken] = useState("");
   const [user, setUser] = useState<UserProfile | null>(null);
@@ -65,20 +67,30 @@ export function DashboardSessionProvider({ children }: Readonly<{ children: Reac
       return;
     }
 
-    setLoading(true);
+    setAccessToken(token);
+    const shouldBlock = !sessionInitializedRef.current;
+    if (shouldBlock) {
+      setLoading(true);
+    }
     try {
-      const [userData, quotaData] = await Promise.all([
-        getMe(token),
-        getQuota(token),
-      ]);
-      setAccessToken(token);
+      const userData = await getMe(token);
       setUser(userData);
-      setQuota(quotaData);
+      sessionInitializedRef.current = true;
+      void getQuota(token)
+        .then((quotaData) => {
+          setQuota(quotaData);
+        })
+        .catch(() => {
+          // Keep the dashboard interactive even if quota refresh is temporarily slow.
+        });
+      void warmVideoConfigCache(token);
     } catch {
       handleUnauthorized();
       return;
     } finally {
-      setLoading(false);
+      if (shouldBlock) {
+        setLoading(false);
+      }
     }
   }, [handleUnauthorized]);
 

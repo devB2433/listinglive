@@ -24,3 +24,6 @@ frontend/.git.local-backup/
 .vscode/
 Thumbs.db
 *.tmp
+
+celerybeat-schedule
+celerybeat-schedule.*

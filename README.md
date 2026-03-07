@@ -49,7 +49,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\dev\restart-dev.ps1
 这个脚本会：
 - 先停止占用 `3001` / `8003` 的旧项目进程
 - 自动启动 `postgres` / `redis`
-- 重启后端、Celery worker 和前端
+- 重启后端、Celery worker、Celery Beat（定时检查异常任务）和前端
 - 把日志写到 `.runtime/`
 
 ### 仅停止前后端与 worker
@@ -81,6 +81,30 @@ npm run dev:fixed
 ## API 文档
 
 启动后访问：http://127.0.0.1:8003/docs
+
+## Ark 视频生成
+
+当前正式视频生成方案见：
+
+- `doc/ark_video_generation_core.md`
+
+核心结论：
+
+- 正式 provider 为 `SeedanceVideoProvider`
+- 当前默认走 Ark REST API
+- 代码同时保留 SDK transport，可通过配置切换
+- 所有生成结果都必须先下载回我方存储，再通过我方接口提供给用户
+
+建议环境变量：
+
+```env
+VIDEO_PROVIDER=seedance
+ARK_API_KEY=
+ARK_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+ARK_VIDEO_MODEL_ID=ep-20260307215031-lgmpq
+ARK_TRANSPORT=rest
+ARK_REQUEST_STYLE=prompt_flags
+```
 
 ## Stripe 接入
 

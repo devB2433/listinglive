@@ -101,12 +101,12 @@
 
 | 步骤 | 内容 | 验收标准 |
 |------|------|----------|
-| 3.1 | 视频服务抽象 | Seedance 客户端封装（创建图生视频、查询状态、解析视频 URL）；模型与参数从配置读；分辨率/比例/时长（2–10 秒）与 API 参数映射 |
+| 3.1 | 视频服务抽象 | Ark / Seedance 视频服务抽象；单一正式 provider 下支持 REST/SDK transport；模型与参数从配置读；分辨率/比例/时长（2–10 秒）与 API 参数映射 |
 | 3.2 | 场景模板 | scene_templates 表 + 列表接口（供前端选择）；后台 CRUD 可放在管理后台模块 |
 | 3.3 | 视频任务模型 | video_tasks 表（user_id, task_type=short/single, status, images JSONB, 分辨率/比例/logo_url, volcengine_task_ids, video_url, expires_at 等），迁移 |
 | 3.4 | 图片上传 API | 上传图片到存储层，返回 URL 或 key；校验类型、大小 |
 | 3.5 | 创建短视频任务 API | 入参：单张图片 key、场景模板 ID、分辨率、比例、时长、可选 logo；校验配额后创建 video_task、扣减配额、入队 Celery |
-| 3.6 | 单视频 Celery 任务 | 调用视频服务创建图生视频、轮询状态、下载到存储、更新 video_tasks.video_url 与状态；失败时退还配额 |
+| 3.6 | 单视频 Celery 任务 | 调用视频服务创建图生视频、轮询状态、下载到我方存储、更新 video_tasks.video_url 与状态；失败时退还配额 |
 | 3.7 | 任务查询与列表 API | 单任务详情、用户任务列表（分页、按状态筛选、按时间排序），支持 task_type 筛选 |
 | 3.8 | 下载 API | 通过存储抽象生成访问 URL（过期时间按套餐 storage_days），仅允许任务所属用户下载 |
 

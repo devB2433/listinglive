@@ -1,13 +1,14 @@
 """
 套餐与配额路由
 """
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.deps import get_current_user, get_db
 from backend.core.api_errors import AppError
 from backend.models.user import User
 from backend.schemas.billing import (
+    ChargeReconciliationOut,
     CapabilityLimitsOut,
     CheckoutSessionOut,
     CreateQuotaPackageCheckoutRequest,
@@ -16,6 +17,7 @@ from backend.schemas.billing import (
     QuotaPackagePlanOut,
     QuotaSnapshotOut,
     SubscriptionPlanOut,
+    TaskChargeReconciliationItemOut,
 )
 from backend.services.billing_service import (
     create_portal_link,
@@ -25,6 +27,7 @@ from backend.services.billing_service import (
 )
 from backend.services.entitlement_service import build_user_access_context
 from backend.services.quota_service import (
+    get_task_charge_reconciliation,
     list_active_quota_package_plans,
     list_active_subscription_plans,
 )
@@ -68,6 +71,38 @@ async def get_my_quota(
             allowed_aspect_ratios=list(context.limits.allowed_aspect_ratios),
             storage_days_display=context.limits.storage_days_display,
         ),
+    )
+
+
+@router.get("/reconciliation", response_model=ChargeReconciliationOut)
+async def get_charge_reconciliation(
+    limit: int = Query(default=100, ge=1, le=500),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ChargeReconciliationOut:
+    result = await get_task_charge_reconciliation(db, user.id, limit=limit)
+    return ChargeReconciliationOut(
+        total_tasks=result["total_tasks"],
+        planned_total=result["planned_total"],
+        charged_total=result["charged_total"],
+        successful_short_tasks=result["successful_short_tasks"],
+        successful_long_tasks=result["successful_long_tasks"],
+        successful_long_segments=result["successful_long_segments"],
+        pending_reserved_total=result["pending_reserved_total"],
+        items=[
+            TaskChargeReconciliationItemOut(
+                task_id=task.id,
+                task_type=task.task_type,
+                status=task.status,
+                planned_quota_consumed=task.planned_quota_consumed,
+                charged_quota_consumed=task.charged_quota_consumed,
+                charge_status=task.charge_status,
+                charged_at=task.charged_at,
+                created_at=task.created_at,
+                finished_at=task.finished_at,
+            )
+            for task in result["items"]
+        ],
     )
 
 

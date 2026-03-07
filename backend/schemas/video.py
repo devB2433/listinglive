@@ -49,6 +49,25 @@ class LongVideoSegmentInput(BaseModel):
     sort_order: int = Field(ge=0)
 
 
+class LongVideoSegmentStatusOut(BaseModel):
+    id: UUID
+    sort_order: int
+    image_key: str
+    duration_seconds: int
+    status: str
+    provider_task_id: str | None
+    segment_video_key: str | None
+    error_message: str | None
+    queued_at: datetime
+    processing_started_at: datetime | None
+    finished_at: datetime | None
+    queue_wait_seconds: int | None = None
+    processing_seconds: int | None = None
+    total_elapsed_seconds: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class CreateLongVideoTaskRequest(BaseModel):
     image_keys: list[str] = Field(min_length=2, max_length=10)
     scene_template_id: UUID
@@ -69,15 +88,26 @@ class VideoTaskOut(BaseModel):
     duration_seconds: int
     logo_key: str | None
     quota_consumed: int
+    planned_quota_consumed: int
+    charged_quota_consumed: int
+    charge_status: str
+    charged_at: datetime | None
     provider_name: str | None
     video_key: str | None
     download_url: str | None
     error_message: str | None
+    queued_at: datetime
+    processing_started_at: datetime | None
+    finished_at: datetime | None
+    queue_wait_seconds: int | None = None
+    processing_seconds: int | None = None
+    total_elapsed_seconds: int | None = None
     expires_at: datetime | None
     created_at: datetime
     updated_at: datetime
     segment_count: int | None = None
     completed_segments: int | None = None
+    long_segments: list[LongVideoSegmentStatusOut] | None = None
 
 
 class VideoTaskListItem(BaseModel):
@@ -87,10 +117,22 @@ class VideoTaskListItem(BaseModel):
     resolution: str
     aspect_ratio: str
     duration_seconds: int
+    quota_consumed: int
+    planned_quota_consumed: int
+    charged_quota_consumed: int
+    charge_status: str
+    charged_at: datetime | None
     video_key: str | None
     download_url: str | None
     error_message: str | None
+    queued_at: datetime
+    processing_started_at: datetime | None
+    finished_at: datetime | None
+    queue_wait_seconds: int | None = None
+    processing_seconds: int | None = None
+    total_elapsed_seconds: int | None = None
     created_at: datetime
     updated_at: datetime
     segment_count: int | None = None
     completed_segments: int | None = None
+    long_segments: list[LongVideoSegmentStatusOut] | None = None

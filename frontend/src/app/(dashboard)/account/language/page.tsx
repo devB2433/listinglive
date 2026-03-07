@@ -37,7 +37,6 @@ export default function AccountLanguagePage() {
   return (
     <section className="rounded-2xl border bg-white p-6">
       <h2 className="text-lg font-semibold text-gray-900">{translate("dashboard.languagePage.title")}</h2>
-      <p className="mt-1 text-sm text-gray-500">{translate("dashboard.languagePage.subtitle")}</p>
       <div className="mt-4 flex max-w-sm flex-col gap-3">
         <label className="text-sm font-medium text-gray-700">{translate("dashboard.accountPage.preferredLanguage")}</label>
         <select

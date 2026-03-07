@@ -57,5 +57,18 @@ services:
     depends_on:
       - api
 
+  beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A backend.tasks.celery_app beat -l info
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://listinglive:listinglive@postgres:5432/listinglive
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - api
+
 volumes:
   pgdata:

@@ -29,6 +29,9 @@ class LongVideoSegment(Base):
     segment_video_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     provider_task_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

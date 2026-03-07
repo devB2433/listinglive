@@ -13,29 +13,16 @@ def merge_segment_videos(
     output_path: Path,
     *,
     fps: int,
-    transition_frames: int = 8,
 ) -> None:
     if len(segment_paths) < 2:
         raise ValueError("长视频至少需要 2 个片段")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     frames = _load_segment_frames(segment_paths)
-    transition_frames = max(1, transition_frames)
 
     with imageio.get_writer(output_path, fps=fps, codec="libx264", format="FFMPEG") as writer:
-        for index, segment_frames in enumerate(frames):
-            if index == 0:
-                for frame in segment_frames[:-transition_frames]:
-                    writer.append_data(frame)
-                continue
-
-            previous_tail = frames[index - 1][-transition_frames:]
-            current_head = segment_frames[:transition_frames]
-            for previous_frame, current_frame in zip(previous_tail, current_head):
-                writer.append_data(_blend_frames(previous_frame, current_frame))
-
-            remaining_frames = segment_frames[transition_frames:-transition_frames] if index < len(frames) - 1 else segment_frames[transition_frames:]
-            for frame in remaining_frames:
+        for segment_frames in frames:
+            for frame in segment_frames:
                 writer.append_data(frame)
 
 
@@ -67,9 +54,3 @@ def _normalize_frame_size(frame: np.ndarray, expected_size: tuple[int, int]) -> 
     image = Image.fromarray(frame)
     resized = image.resize((width, height), Image.Resampling.LANCZOS)
     return np.asarray(resized)
-
-
-def _blend_frames(previous_frame: np.ndarray, current_frame: np.ndarray) -> np.ndarray:
-    alpha = 0.5
-    blended = previous_frame.astype(np.float32) * (1 - alpha) + current_frame.astype(np.float32) * alpha
-    return blended.astype(np.uint8)

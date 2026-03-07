@@ -4,7 +4,7 @@
       "template_key": "living_push",
       "category": "short",
       "name": "客厅推镜",
-      "prompt": "请基于这张房源照片，保持真实空间结构与光线，做平滑缓慢的镜头推进，突出客厅通透感与采光。",
+      "prompt": "镜头缓慢推进，自然光。",
       "sort_order": 10,
       "is_enabled": true
     },
@@ -12,7 +12,7 @@
       "template_key": "kitchen_pan",
       "category": "short",
       "name": "厨房环视",
-      "prompt": "请基于这张房源照片，生成稳定自然的轻微环视镜头，突出厨房台面、收纳与整洁感。",
+      "prompt": "镜头轻微水平摇摄，幅度小。",
       "sort_order": 20,
       "is_enabled": true
     },
@@ -20,7 +20,7 @@
       "template_key": "bedroom_tour",
       "category": "short",
       "name": "卧室漫游",
-      "prompt": "请基于这张房源照片，生成柔和稳定的室内漫游镜头，突出卧室尺度、采光与舒适氛围。",
+      "prompt": "镜头平稳缓慢推进，柔和采光。",
       "sort_order": 30,
       "is_enabled": true
     },
@@ -28,7 +28,7 @@
       "template_key": "listing_story_flow",
       "category": "long_unified",
       "name": "房源故事线",
-      "prompt": "请基于房源图片生成连续统一的展示镜头，整体节奏平稳自然，突出空间连贯性、户型层次和看房动线，适合多个房间顺序串联展示。",
+      "prompt": "镜头缓慢推进依次经过各空间，光线自然，过渡平稳。",
       "sort_order": 110,
       "is_enabled": true
     },
@@ -36,7 +36,7 @@
       "template_key": "bright_showcase",
       "category": "long_unified",
       "name": "明亮展示片",
-      "prompt": "请基于房源图片生成风格统一的明亮展示视频，保持自然采光与空间真实性，镜头切换柔和，适合完整呈现房源的整体品质感。",
+      "prompt": "镜头平稳缓慢推进，自然采光，节奏统一。",
       "sort_order": 120,
       "is_enabled": true
     },
@@ -44,7 +44,7 @@
       "template_key": "premium_walkthrough",
       "category": "long_unified",
       "name": "高端导览片",
-      "prompt": "请基于房源图片生成高端感更强的连续导览视频，整体节奏从容、镜头稳定，突出材质细节、空间尺度与房源完整参观体验。",
+      "prompt": "镜头缓慢平稳推进，从容展示，光线稳定。",
       "sort_order": 130,
       "is_enabled": true
     }

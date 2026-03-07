@@ -33,7 +33,7 @@ class LongVideoHelperTests(unittest.TestCase):
             self._write_segment(first, (255, 0, 0))
             self._write_segment(second, (0, 0, 255))
 
-            merge_segment_videos([first, second], output, fps=8, transition_frames=2)
+            merge_segment_videos([first, second], output, fps=8)
 
             self.assertTrue(output.exists())
             reader = imageio.get_reader(output, format="FFMPEG")

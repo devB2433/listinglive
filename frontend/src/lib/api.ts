@@ -60,6 +60,29 @@ export type CustomerPortalResult = {
   portal_url: string;
 };
 
+export type ChargeReconciliationItem = {
+  task_id: string;
+  task_type: string;
+  status: string;
+  planned_quota_consumed: number;
+  charged_quota_consumed: number;
+  charge_status: string;
+  charged_at?: string | null;
+  created_at: string;
+  finished_at?: string | null;
+};
+
+export type ChargeReconciliation = {
+  total_tasks: number;
+  planned_total: number;
+  charged_total: number;
+  successful_short_tasks: number;
+  successful_long_tasks: number;
+  successful_long_segments: number;
+  pending_reserved_total: number;
+  items: ChargeReconciliationItem[];
+};
+
 export type SceneTemplate = {
   id: string;
   template_key: string;
@@ -81,6 +104,25 @@ export type LongVideoSegmentInput = {
   sort_order: number;
 };
 
+export type LongVideoSegmentStatus = {
+  id: string;
+  sort_order: number;
+  image_key: string;
+  duration_seconds: number;
+  status: string;
+  provider_task_id?: string | null;
+  segment_video_key?: string | null;
+  error_message?: string | null;
+  queued_at: string;
+  processing_started_at?: string | null;
+  finished_at?: string | null;
+  queue_wait_seconds?: number | null;
+  processing_seconds?: number | null;
+  total_elapsed_seconds?: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type VideoTask = {
   id: string;
   task_type: string;
@@ -91,13 +133,24 @@ export type VideoTask = {
   duration_seconds: number;
   logo_key?: string | null;
   quota_consumed?: number;
+  planned_quota_consumed: number;
+  charged_quota_consumed: number;
+  charge_status: string;
+  charged_at?: string | null;
   provider_name?: string | null;
   video_key?: string | null;
   download_url?: string | null;
   error_message?: string | null;
   expires_at?: string | null;
+  queued_at: string;
+  processing_started_at?: string | null;
+  finished_at?: string | null;
+  queue_wait_seconds?: number | null;
+  processing_seconds?: number | null;
+  total_elapsed_seconds?: number | null;
   segment_count?: number | null;
   completed_segments?: number | null;
+  long_segments?: LongVideoSegmentStatus[] | null;
   created_at: string;
   updated_at: string;
 };
@@ -183,6 +236,17 @@ export async function getQuota(accessToken: string) {
   });
   if (!res.ok) await parseError(res);
   return res.json() as Promise<QuotaSnapshot>;
+}
+
+export async function getChargeReconciliation(accessToken: string, options?: { limit?: number }) {
+  const query = new URLSearchParams();
+  if (options?.limit) query.set("limit", String(options.limit));
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  const res = await fetch(`${PREFIX}/billing/reconciliation${suffix}`, {
+    headers: authHeaders(accessToken),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<ChargeReconciliation>;
 }
 
 export async function createSubscriptionCheckout(accessToken: string, planId: string) {
@@ -360,4 +424,13 @@ export async function downloadVideoTask(accessToken: string, taskId: string) {
   });
   if (!res.ok) await parseError(res);
   return res.blob();
+}
+
+export async function retryVideoTask(accessToken: string, taskId: string) {
+  const res = await fetch(`${PREFIX}/videos/tasks/${taskId}/retry`, {
+    method: "POST",
+    headers: authHeaders(accessToken),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<VideoTask>;
 }

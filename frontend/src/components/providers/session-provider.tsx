@@ -14,6 +14,9 @@ import { clearStoredTokens, getStoredAccessToken } from "@/lib/session";
 
 const EMPTY_QUOTA: QuotaSnapshot = {
   subscription_plan_type: null,
+  subscription_status: null,
+  subscription_cancel_at_period_end: false,
+  subscription_current_period_end: null,
   subscription_remaining: 0,
   package_remaining: 0,
   paid_package_remaining: 0,

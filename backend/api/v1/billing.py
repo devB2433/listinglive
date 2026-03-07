@@ -1,12 +1,28 @@
 """
 套餐与配额路由
 """
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.deps import get_current_user, get_db
+from backend.core.api_errors import AppError
 from backend.models.user import User
-from backend.schemas.billing import CapabilityLimitsOut, QuotaPackagePlanOut, QuotaSnapshotOut, SubscriptionPlanOut
+from backend.schemas.billing import (
+    CapabilityLimitsOut,
+    CheckoutSessionOut,
+    CreateQuotaPackageCheckoutRequest,
+    CreateSubscriptionCheckoutRequest,
+    CustomerPortalOut,
+    QuotaPackagePlanOut,
+    QuotaSnapshotOut,
+    SubscriptionPlanOut,
+)
+from backend.services.billing_service import (
+    create_portal_link,
+    create_quota_package_checkout,
+    create_subscription_checkout,
+    process_webhook_payload,
+)
 from backend.services.entitlement_service import build_user_access_context
 from backend.services.quota_service import (
     list_active_quota_package_plans,
@@ -34,6 +50,9 @@ async def get_my_quota(
     context = await build_user_access_context(db, user.id)
     return QuotaSnapshotOut(
         subscription_plan_type=context.subscription_plan_type,
+        subscription_status=context.subscription_status,
+        subscription_cancel_at_period_end=context.subscription_cancel_at_period_end,
+        subscription_current_period_end=context.subscription_current_period_end,
         subscription_remaining=context.subscription_remaining,
         package_remaining=context.package_remaining,
         paid_package_remaining=context.paid_package_remaining,
@@ -50,3 +69,63 @@ async def get_my_quota(
             storage_days_display=context.limits.storage_days_display,
         ),
     )
+
+
+@router.post("/checkout/subscription", response_model=CheckoutSessionOut)
+async def create_subscription_checkout_session(
+    body: CreateSubscriptionCheckoutRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CheckoutSessionOut:
+    try:
+        checkout_url = await create_subscription_checkout(db, user, body.plan_id)
+        await db.commit()
+        return CheckoutSessionOut(checkout_url=checkout_url)
+    except AppError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+
+
+@router.post("/checkout/quota-package", response_model=CheckoutSessionOut)
+async def create_quota_package_checkout_session(
+    body: CreateQuotaPackageCheckoutRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CheckoutSessionOut:
+    try:
+        checkout_url = await create_quota_package_checkout(db, user, body.package_plan_id)
+        await db.commit()
+        return CheckoutSessionOut(checkout_url=checkout_url)
+    except AppError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+
+
+@router.post("/customer-portal", response_model=CustomerPortalOut)
+async def create_billing_customer_portal(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> CustomerPortalOut:
+    try:
+        portal_url = await create_portal_link(db, user)
+        await db.commit()
+        return CustomerPortalOut(portal_url=portal_url)
+    except AppError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+
+
+@router.post("/webhooks/stripe")
+async def handle_stripe_webhook(
+    request: Request,
+    stripe_signature: str | None = Header(default=None, alias="Stripe-Signature"),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    payload = await request.body()
+    try:
+        result = await process_webhook_payload(db, payload, stripe_signature)
+        await db.commit()
+        return {"status": result}
+    except AppError as exc:
+        await db.commit()
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+    except Exception:
+        await db.commit()
+        raise

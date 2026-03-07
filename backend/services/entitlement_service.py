@@ -59,6 +59,11 @@ def build_access_context_from_snapshot(snapshot: dict) -> AccessContext:
     return AccessContext(
         access_tier=access_tier,
         subscription_plan_type=subscription.plan_type if subscription is not None else None,
+        subscription_status=getattr(subscription, "status", None) if subscription is not None else None,
+        subscription_cancel_at_period_end=getattr(subscription, "cancel_at_period_end", False)
+        if subscription is not None
+        else False,
+        subscription_current_period_end=getattr(subscription, "current_period_end", None) if subscription is not None else None,
         subscription_remaining=snapshot["subscription_remaining"],
         package_remaining=snapshot["package_remaining"],
         paid_package_remaining=snapshot["paid_package_remaining"],

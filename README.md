@@ -82,6 +82,17 @@ npm run dev:fixed
 
 启动后访问：http://127.0.0.1:8003/docs
 
+## Stripe 接入
+
+Stripe 相关的真实环境接入步骤见：
+
+- `doc/stripe_setup_checklist.md`
+
+Price ID 回填工具：
+
+- `config/stripe_price_ids.example.json`
+- `scripts/billing/sync_stripe_price_ids.py`
+
 ## 健康检查
 
 ```bash

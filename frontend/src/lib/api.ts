@@ -14,6 +14,9 @@ export type UserProfile = {
 
 export type QuotaSnapshot = {
   subscription_plan_type: string | null;
+  subscription_status: string | null;
+  subscription_cancel_at_period_end: boolean;
+  subscription_current_period_end: string | null;
   subscription_remaining: number;
   package_remaining: number;
   paid_package_remaining: number;
@@ -47,6 +50,14 @@ export type QuotaPackagePlan = {
   quota_amount: number;
   price_cad: string;
   validity_days: number | null;
+};
+
+export type CheckoutSessionResult = {
+  checkout_url: string;
+};
+
+export type CustomerPortalResult = {
+  portal_url: string;
 };
 
 export type SceneTemplate = {
@@ -172,6 +183,41 @@ export async function getQuota(accessToken: string) {
   });
   if (!res.ok) await parseError(res);
   return res.json() as Promise<QuotaSnapshot>;
+}
+
+export async function createSubscriptionCheckout(accessToken: string, planId: string) {
+  const res = await fetch(`${PREFIX}/billing/checkout/subscription`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(accessToken),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ plan_id: planId }),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<CheckoutSessionResult>;
+}
+
+export async function createQuotaPackageCheckout(accessToken: string, packagePlanId: string) {
+  const res = await fetch(`${PREFIX}/billing/checkout/quota-package`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(accessToken),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ package_plan_id: packagePlanId }),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<CheckoutSessionResult>;
+}
+
+export async function createCustomerPortal(accessToken: string) {
+  const res = await fetch(`${PREFIX}/billing/customer-portal`, {
+    method: "POST",
+    headers: authHeaders(accessToken),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<CustomerPortalResult>;
 }
 
 export async function getSubscriptionPlans(accessToken: string) {

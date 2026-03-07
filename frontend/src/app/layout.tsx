@@ -5,7 +5,7 @@ import { LocaleProvider } from "@/components/providers/locale-provider";
 
 export const metadata: Metadata = {
   title: "ListingLive",
-  description: "Image-to-video for real estate agents",
+  description: "Turn listing photos into ready-to-publish property videos with an AI workflow built for real estate teams.",
 };
 
 export default function RootLayout({

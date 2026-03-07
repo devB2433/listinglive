@@ -5,6 +5,9 @@ import { useEffect, useState } from "react";
 import { useLocale } from "@/components/providers/locale-provider";
 import { useDashboardSession } from "@/components/providers/session-provider";
 import {
+  createCustomerPortal,
+  createQuotaPackageCheckout,
+  createSubscriptionCheckout,
   getQuotaPackagePlans,
   getSubscriptionPlans,
   type QuotaPackagePlan,
@@ -14,11 +17,13 @@ import { getAccessTierLabel, getShortDurationSummary, getStorageDaysSummary } fr
 
 export default function BillingPage() {
   const { accessToken, quota } = useDashboardSession();
-  const { translate } = useLocale();
+  const { formatDate, translate } = useLocale();
   const [subscriptionPlans, setSubscriptionPlans] = useState<SubscriptionPlan[]>([]);
   const [quotaPackagePlans, setQuotaPackagePlans] = useState<QuotaPackagePlan[]>([]);
   const [loadingCatalogs, setLoadingCatalogs] = useState(true);
   const [catalogError, setCatalogError] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [pendingAction, setPendingAction] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -26,6 +31,7 @@ export default function BillingPage() {
     async function loadCatalogs() {
       setLoadingCatalogs(true);
       setCatalogError("");
+      setActionError("");
 
       const [plansResult, packagePlansResult] = await Promise.allSettled([
         getSubscriptionPlans(accessToken),
@@ -54,6 +60,50 @@ export default function BillingPage() {
     };
   }, [accessToken, translate]);
 
+  const hasSubscription = Boolean(quota.subscription_plan_type);
+
+  async function redirectTo(url: string) {
+    window.location.assign(url);
+  }
+
+  async function openCustomerPortal(actionKey: string) {
+    setPendingAction(actionKey);
+    setActionError("");
+    try {
+      const result = await createCustomerPortal(accessToken);
+      await redirectTo(result.portal_url);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : translate("common.requestFailed"));
+      setPendingAction(null);
+    }
+  }
+
+  async function handleSubscribe(planId: string) {
+    const actionKey = `plan:${planId}`;
+    setPendingAction(actionKey);
+    setActionError("");
+    try {
+      const result = await createSubscriptionCheckout(accessToken, planId);
+      await redirectTo(result.checkout_url);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : translate("common.requestFailed"));
+      setPendingAction(null);
+    }
+  }
+
+  async function handleQuotaPackagePurchase(packagePlanId: string) {
+    const actionKey = `package:${packagePlanId}`;
+    setPendingAction(actionKey);
+    setActionError("");
+    try {
+      const result = await createQuotaPackageCheckout(accessToken, packagePlanId);
+      await redirectTo(result.checkout_url);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : translate("common.requestFailed"));
+      setPendingAction(null);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -80,7 +130,33 @@ export default function BillingPage() {
       </section>
 
       <section className="rounded-2xl border bg-white p-6">
-        <h2 className="text-lg font-semibold text-gray-900">{translate("dashboard.billing.currentStatus")}</h2>
+        <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold text-gray-900">{translate("dashboard.billing.currentStatus")}</h2>
+            {(quota.subscription_cancel_at_period_end || quota.subscription_current_period_end) && (
+              <div className="mt-2 space-y-1 text-sm text-amber-700">
+                {quota.subscription_cancel_at_period_end && <p>{translate("dashboard.billing.cancelAtPeriodEnd")}</p>}
+                {quota.subscription_current_period_end && (
+                  <p>
+                    {translate("dashboard.billing.currentPeriodEnd", {
+                      value: formatDate(quota.subscription_current_period_end),
+                    })}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => void openCustomerPortal("portal:status")}
+            disabled={pendingAction === "portal:status"}
+            className="w-full rounded-md border border-blue-200 bg-blue-50 px-4 py-2 text-sm text-blue-700 disabled:opacity-60 md:w-auto"
+          >
+            {pendingAction === "portal:status"
+              ? translate("dashboard.billing.redirectPortal")
+              : translate("dashboard.billing.manageAction")}
+          </button>
+        </div>
         <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <InfoPanel
             title={translate("common.accountStatus")}
@@ -109,6 +185,7 @@ export default function BillingPage() {
             }
           />
         </div>
+        {actionError && <p className="mt-4 text-sm text-red-600">{actionError}</p>}
       </section>
 
       <section className="rounded-2xl border bg-white p-6">
@@ -134,6 +211,12 @@ export default function BillingPage() {
           <div className="mt-4 grid gap-4 xl:grid-cols-3">
           {subscriptionPlans.map((plan) => {
             const isCurrent = quota.subscription_plan_type === plan.plan_type;
+            const actionKey = `plan:${plan.id}`;
+            const buttonLabel = isCurrent
+              ? translate("dashboard.billing.manageAction")
+              : hasSubscription
+                ? translate("dashboard.billing.portalChangeAction")
+                : translate("dashboard.billing.subscribeAction");
             return (
               <div key={plan.id} className={`rounded-xl border p-4 ${isCurrent ? "border-blue-600 bg-blue-50" : "bg-gray-50"}`}>
                 <div className="flex items-center justify-between gap-3">
@@ -156,6 +239,28 @@ export default function BillingPage() {
                     ? translate("dashboard.billing.basicPlanDesc")
                     : translate("dashboard.billing.advancedPlanDesc")}
                 </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (hasSubscription) {
+                      void openCustomerPortal(actionKey);
+                      return;
+                    }
+                    void handleSubscribe(plan.id);
+                  }}
+                  disabled={pendingAction !== null}
+                  className={`mt-4 w-full rounded-md border px-4 py-2 text-sm ${
+                    isCurrent
+                      ? "border-blue-500 bg-white text-blue-700"
+                      : "border-blue-200 bg-blue-50 text-blue-700"
+                  } disabled:opacity-60`}
+                >
+                  {pendingAction === actionKey
+                    ? hasSubscription
+                      ? translate("dashboard.billing.redirectPortal")
+                      : translate("dashboard.billing.redirectCheckout")
+                    : buttonLabel}
+                </button>
               </div>
             );
           })}
@@ -208,14 +313,17 @@ export default function BillingPage() {
               </p>
               <button
                 type="button"
-                disabled
+                onClick={() => void handleQuotaPackagePurchase(plan.id)}
+                disabled={!quota.can_purchase_quota_package || pendingAction !== null}
                 className={`mt-4 w-full rounded-md border px-4 py-2 text-sm ${
                   quota.can_purchase_quota_package
-                    ? "border-blue-200 bg-blue-50 text-blue-700 opacity-70"
+                    ? "border-blue-200 bg-blue-50 text-blue-700"
                     : "cursor-not-allowed border-gray-200 bg-gray-100 text-gray-500"
-                }`}
+                } disabled:opacity-60`}
               >
-                {quota.can_purchase_quota_package
+                {pendingAction === `package:${plan.id}`
+                  ? translate("dashboard.billing.redirectCheckout")
+                  : quota.can_purchase_quota_package
                   ? translate("dashboard.billing.packageActionEnabled")
                   : translate("dashboard.billing.packageActionDisabled")}
               </button>

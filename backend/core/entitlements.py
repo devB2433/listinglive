@@ -2,6 +2,7 @@
 统一的套餐权限矩阵
 """
 from dataclasses import dataclass
+from datetime import datetime
 
 ACCESS_TIER_SIGNUP_BONUS = "signup_bonus"
 ACCESS_TIER_BASIC = "basic"
@@ -71,6 +72,9 @@ class TierEntitlement:
 class AccessContext:
     access_tier: str
     subscription_plan_type: str | None
+    subscription_status: str | None
+    subscription_cancel_at_period_end: bool
+    subscription_current_period_end: datetime | None
     subscription_remaining: int
     package_remaining: int
     paid_package_remaining: int

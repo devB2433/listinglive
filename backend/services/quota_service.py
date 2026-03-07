@@ -12,6 +12,7 @@ from backend.models.subscription import Subscription, SubscriptionPlan
 
 SIGNUP_BONUS_PACKAGE_TYPE = "signup_bonus"
 SIGNUP_BONUS_QUOTA = 5
+ACTIVE_SUBSCRIPTION_STATUSES = ("active", "trialing", "past_due")
 
 
 async def ensure_signup_bonus(db: AsyncSession, user_id: UUID) -> None:
@@ -49,7 +50,7 @@ async def get_active_subscription(db: AsyncSession, user_id: UUID) -> Subscripti
     now = datetime.now(timezone.utc)
     stmt = select(Subscription).where(
         Subscription.user_id == user_id,
-        Subscription.status == "active",
+        Subscription.status.in_(ACTIVE_SUBSCRIPTION_STATUSES),
     ).order_by(Subscription.created_at.desc())
     subs = list((await db.execute(stmt)).scalars().all())
     for sub in subs:

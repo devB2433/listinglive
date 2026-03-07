@@ -27,3 +27,4 @@ python-multipart>=0.0.6
 Pillow
 imageio
 imageio-ffmpeg
+stripe>=11.6.0

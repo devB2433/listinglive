@@ -28,6 +28,7 @@ from backend.services.video_service import (
     create_long_video_task,
     create_short_video_task,
     delete_logo_asset,
+    enqueue_video_task_or_fail,
     get_video_task_for_user,
     list_scene_templates,
     list_user_logos,
@@ -138,7 +139,7 @@ async def create_short_task(
         )
         await db.commit()
         await db.refresh(task)
-        process_short_video_task_job.delay(str(task.id))
+        await enqueue_video_task_or_fail(db, task=task, enqueue_fn=process_short_video_task_job.delay)
         return to_video_task_out(task)
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
@@ -168,7 +169,7 @@ async def create_long_task(
         )
         await db.commit()
         await db.refresh(task)
-        process_long_video_task_job.delay(str(task.id))
+        await enqueue_video_task_or_fail(db, task=task, enqueue_fn=process_long_video_task_job.delay)
         return to_video_task_out(task)
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})

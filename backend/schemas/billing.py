@@ -16,6 +16,7 @@ class SubscriptionPlanOut(BaseModel):
     quota_per_month: int
     price_cad: Decimal
     storage_days: int
+    stripe_price_id: str | None = None
 
     class Config:
         from_attributes = True
@@ -28,6 +29,7 @@ class QuotaPackagePlanOut(BaseModel):
     quota_amount: int
     price_cad: Decimal
     validity_days: Optional[int]
+    stripe_price_id: str | None = None
 
     class Config:
         from_attributes = True
@@ -43,6 +45,9 @@ class CapabilityLimitsOut(BaseModel):
 
 class QuotaSnapshotOut(BaseModel):
     subscription_plan_type: Optional[str]
+    subscription_status: Optional[str] = None
+    subscription_cancel_at_period_end: bool = False
+    subscription_current_period_end: Optional[datetime] = None
     subscription_remaining: int
     package_remaining: int
     paid_package_remaining: int
@@ -52,3 +57,19 @@ class QuotaSnapshotOut(BaseModel):
     capabilities: list[str]
     can_purchase_quota_package: bool
     limits: CapabilityLimitsOut
+
+
+class CreateSubscriptionCheckoutRequest(BaseModel):
+    plan_id: UUID
+
+
+class CreateQuotaPackageCheckoutRequest(BaseModel):
+    package_plan_id: UUID
+
+
+class CheckoutSessionOut(BaseModel):
+    checkout_url: str
+
+
+class CustomerPortalOut(BaseModel):
+    portal_url: str

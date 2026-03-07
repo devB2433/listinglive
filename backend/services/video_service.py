@@ -1,6 +1,7 @@
 """
 视频任务服务
 """
+import logging
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -46,6 +47,7 @@ ALLOWED_IMAGE_CONTENT_TYPES = {
 }
 MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024
 DEFAULT_STORAGE_DAYS = 30
+logger = logging.getLogger(__name__)
 
 VIDEO_TASK_STATUS_QUEUED = "queued"
 VIDEO_TASK_STATUS_PROCESSING = "processing"
@@ -61,6 +63,11 @@ LONG_VIDEO_SEGMENT_STATUS_QUEUED = "queued"
 LONG_VIDEO_SEGMENT_STATUS_PROCESSING = "processing"
 LONG_VIDEO_SEGMENT_STATUS_SUCCEEDED = "succeeded"
 LONG_VIDEO_SEGMENT_STATUS_FAILED = "failed"
+ACTIVE_VIDEO_TASK_STATUSES = (
+    VIDEO_TASK_STATUS_QUEUED,
+    VIDEO_TASK_STATUS_PROCESSING,
+    VIDEO_TASK_STATUS_MERGING,
+)
 
 
 async def sync_scene_templates(db: AsyncSession) -> None:
@@ -477,6 +484,155 @@ async def get_storage_days_for_user(db: AsyncSession, user_id: UUID) -> int:
     return max(subscription.storage_days, DEFAULT_STORAGE_DAYS)
 
 
+def create_temporary_output_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.stem}.tmp{output_path.suffix}")
+
+
+def is_task_stale(updated_at: datetime, *, now: datetime, stale_seconds: int) -> bool:
+    return updated_at <= now - timedelta(seconds=stale_seconds)
+
+
+async def safe_delete_storage_key(key: str | None) -> bool:
+    if not key:
+        return True
+    try:
+        await delete_key(key)
+        return True
+    except Exception:
+        logger.warning("Failed to delete storage key: %s", key, exc_info=True)
+        return False
+
+
+def safe_delete_local_path(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        if path.exists():
+            path.unlink()
+    except Exception:
+        logger.warning("Failed to delete local path: %s", path, exc_info=True)
+
+
+async def enqueue_video_task_or_fail(
+    db: AsyncSession,
+    *,
+    task: VideoTask,
+    enqueue_fn,
+) -> None:
+    try:
+        enqueue_fn(str(task.id))
+    except Exception as exc:
+        await db.rollback()
+        task = await db.get(VideoTask, task.id)
+        if task is None:
+            raise AppError("videos.task.enqueueFailed", status_code=503) from exc
+        await fail_video_task(db, task.id, "videos.task.enqueueFailed")
+        await db.commit()
+        raise AppError("videos.task.enqueueFailed", status_code=503) from exc
+
+
+async def fail_video_task(
+    db: AsyncSession,
+    task_id: UUID,
+    error_message: str,
+) -> tuple[VideoTask | None, list[str]]:
+    task = await db.get(VideoTask, task_id)
+    if task is None:
+        return None, []
+    if task.status == VIDEO_TASK_STATUS_FAILED:
+        return task, []
+    if task.status == VIDEO_TASK_STATUS_SUCCEEDED:
+        return task, []
+
+    cleanup_keys: list[str] = []
+    if task.video_key:
+        cleanup_keys.append(task.video_key)
+        task.video_key = None
+
+    if task.task_type == VIDEO_TASK_TYPE_LONG:
+        segment_stmt = select(LongVideoSegment).where(LongVideoSegment.task_id == task.id)
+        segments = list((await db.execute(segment_stmt)).scalars().all())
+        for segment in segments:
+            if segment.segment_video_key:
+                cleanup_keys.append(segment.segment_video_key)
+                segment.segment_video_key = None
+            if segment.status != LONG_VIDEO_SEGMENT_STATUS_SUCCEEDED:
+                segment.status = LONG_VIDEO_SEGMENT_STATUS_FAILED
+            segment.error_message = error_message
+
+    task.status = VIDEO_TASK_STATUS_FAILED
+    task.error_message = error_message
+    await refund_quota(db, task.user_id, task.quota_consumed)
+    await db.flush()
+    return task, cleanup_keys
+
+
+async def cleanup_storage_keys_best_effort(keys: list[str]) -> None:
+    seen: set[str] = set()
+    for key in keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        await safe_delete_storage_key(key)
+
+
+async def reconcile_stale_video_tasks() -> int:
+    now = datetime.now(timezone.utc)
+    stmt = (
+        select(VideoTask)
+        .where(VideoTask.status.in_(ACTIVE_VIDEO_TASK_STATUSES))
+        .order_by(VideoTask.updated_at.asc())
+    )
+    cleaned = 0
+    async with AsyncSessionLocal() as db:
+        tasks = list((await db.execute(stmt)).scalars().all())
+        for task in tasks:
+            if not is_task_stale(task.updated_at, now=now, stale_seconds=settings.VIDEO_TASK_STALE_SECONDS):
+                continue
+            _, cleanup_keys = await fail_video_task(db, task.id, "视频任务执行超时或中断，请重试。")
+            await db.commit()
+            await cleanup_storage_keys_best_effort(cleanup_keys)
+            cleaned += 1
+    return cleaned
+
+
+async def reconcile_stale_video_tasks_on_startup() -> None:
+    cleaned = await reconcile_stale_video_tasks()
+    if cleaned > 0:
+        logger.warning("Reconciled %s stale video task(s) on startup.", cleaned)
+
+
+async def cleanup_expired_video_files() -> int:
+    now = datetime.now(timezone.utc)
+    cleaned = 0
+    async with AsyncSessionLocal() as db:
+        stmt = (
+            select(VideoTask)
+            .where(
+                VideoTask.status == VIDEO_TASK_STATUS_SUCCEEDED,
+                VideoTask.expires_at.is_not(None),
+                VideoTask.expires_at < now,
+                VideoTask.video_key.is_not(None),
+            )
+            .order_by(VideoTask.expires_at.asc())
+            .limit(settings.VIDEO_EXPIRED_CLEANUP_BATCH_SIZE)
+        )
+        tasks = list((await db.execute(stmt)).scalars().all())
+        for task in tasks:
+            deleted = await safe_delete_storage_key(task.video_key)
+            if deleted:
+                task.video_key = None
+                cleaned += 1
+        await db.commit()
+    return cleaned
+
+
+async def cleanup_expired_video_files_on_startup() -> None:
+    cleaned = await cleanup_expired_video_files()
+    if cleaned > 0:
+        logger.info("Cleaned up %s expired video file(s) on startup.", cleaned)
+
+
 def get_segment_progress(task: VideoTask) -> tuple[int | None, int | None]:
     if task.task_type != VIDEO_TASK_TYPE_LONG:
         return None, None
@@ -544,7 +700,11 @@ async def process_short_video_task(task_id: UUID | str) -> None:
         task = await db.get(VideoTask, task_id)
         if task is None:
             return
-        if task.status == VIDEO_TASK_STATUS_SUCCEEDED:
+        if task.status in {
+            VIDEO_TASK_STATUS_SUCCEEDED,
+            VIDEO_TASK_STATUS_PROCESSING,
+            VIDEO_TASK_STATUS_MERGING,
+        }:
             return
 
         task.status = VIDEO_TASK_STATUS_PROCESSING
@@ -552,6 +712,7 @@ async def process_short_video_task(task_id: UUID | str) -> None:
         await db.commit()
         await db.refresh(task)
 
+        output_key: str | None = None
         try:
             output_key, generated = await generate_video_output(
                 image_key=task.image_keys[0],
@@ -569,13 +730,11 @@ async def process_short_video_task(task_id: UUID | str) -> None:
             await db.commit()
         except Exception as exc:
             await db.rollback()
-            task = await db.get(VideoTask, task_id)
-            if task is None:
-                return
-            task.status = VIDEO_TASK_STATUS_FAILED
-            task.error_message = str(exc)
-            await refund_quota(db, task.user_id, task.quota_consumed)
+            _, cleanup_keys = await fail_video_task(db, task_id, str(exc))
             await db.commit()
+            if output_key:
+                cleanup_keys.append(output_key)
+            await cleanup_storage_keys_best_effort(cleanup_keys)
 
 
 async def process_long_video_task(task_id: UUID | str) -> None:
@@ -585,10 +744,16 @@ async def process_long_video_task(task_id: UUID | str) -> None:
         task = await db.get(VideoTask, task_id)
         if task is None:
             return
-        if task.status == VIDEO_TASK_STATUS_SUCCEEDED:
+        if task.status in {
+            VIDEO_TASK_STATUS_SUCCEEDED,
+            VIDEO_TASK_STATUS_PROCESSING,
+            VIDEO_TASK_STATUS_MERGING,
+        }:
             return
 
         segment_keys: list[str] = []
+        final_output_key: str | None = None
+        temp_output_path: Path | None = None
         try:
             task.status = VIDEO_TASK_STATUS_PROCESSING
             task.error_message = None
@@ -643,14 +808,21 @@ async def process_long_video_task(task_id: UUID | str) -> None:
             task.status = VIDEO_TASK_STATUS_MERGING
             await db.commit()
 
-            output_key = create_output_key()
-            merge_segment_videos(
-                [get_local_path(key) for key in segment_keys],
-                get_local_path(output_key),
-                fps=settings.VIDEO_FPS,
+            final_output_key = create_output_key()
+            final_output_path = get_local_path(final_output_key)
+            temp_output_path = create_temporary_output_path(final_output_path)
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    merge_segment_videos,
+                    [get_local_path(key) for key in segment_keys],
+                    temp_output_path,
+                    fps=settings.VIDEO_FPS,
+                ),
+                timeout=settings.VIDEO_MERGE_TIMEOUT_SECONDS,
             )
+            temp_output_path.replace(final_output_path)
 
-            task.video_key = output_key
+            task.video_key = final_output_key
             task.status = VIDEO_TASK_STATUS_SUCCEEDED
             task.expires_at = datetime.now(timezone.utc) + timedelta(days=await get_storage_days_for_user(db, task.user_id))
             task.provider_task_ids = {
@@ -659,29 +831,16 @@ async def process_long_video_task(task_id: UUID | str) -> None:
                 "completed_segments": len(segments),
             }
             await db.commit()
-            for key in segment_keys:
-                await delete_key(key)
+            await cleanup_storage_keys_best_effort(segment_keys)
         except Exception as exc:
             await db.rollback()
-            task = await db.get(VideoTask, task_id)
-            if task is None:
-                return
-            task.status = VIDEO_TASK_STATUS_FAILED
-            task.error_message = str(exc)
-
-            segment_stmt = select(LongVideoSegment).where(LongVideoSegment.task_id == task.id)
-            segments = list((await db.execute(segment_stmt)).scalars().all())
-            for segment in segments:
-                if segment.status != LONG_VIDEO_SEGMENT_STATUS_SUCCEEDED:
-                    segment.status = LONG_VIDEO_SEGMENT_STATUS_FAILED
-                    segment.error_message = str(exc)
-            await refund_quota(db, task.user_id, task.quota_consumed)
+            _, cleanup_keys = await fail_video_task(db, task_id, str(exc))
             await db.commit()
-
-            for key in segment_keys:
-                await delete_key(key)
-            if task.video_key:
-                await delete_key(task.video_key)
+            cleanup_keys.extend(segment_keys)
+            if final_output_key:
+                cleanup_keys.append(final_output_key)
+            await cleanup_storage_keys_best_effort(cleanup_keys)
+            safe_delete_local_path(temp_output_path)
 
 
 async def generate_video_output(
@@ -698,17 +857,27 @@ async def generate_video_output(
     logo_path = get_local_path(logo_key) if logo_key else None
     output_key = create_output_key()
     output_path = get_local_path(output_key)
+    temp_output_path = create_temporary_output_path(output_path)
 
-    result = await provider.generate_image_to_video(
-        input_path=image_path,
-        output_path=output_path,
-        prompt=prompt,
-        resolution=resolution,
-        aspect_ratio=aspect_ratio,
-        duration_seconds=duration_seconds,
-        logo_path=logo_path,
-    )
-    return output_key, result
+    try:
+        result = await asyncio.wait_for(
+            provider.generate_image_to_video(
+                input_path=image_path,
+                output_path=temp_output_path,
+                prompt=prompt,
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+                duration_seconds=duration_seconds,
+                logo_path=logo_path,
+            ),
+            timeout=settings.VIDEO_GENERATE_TIMEOUT_SECONDS,
+        )
+        temp_output_path.replace(output_path)
+        return output_key, result
+    except Exception:
+        safe_delete_local_path(temp_output_path)
+        safe_delete_local_path(output_path)
+        raise
 
 
 def create_output_key() -> str:

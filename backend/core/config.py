@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     VIDEO_POLL_INTERVAL_SECONDS: int = 5
     VIDEO_MAX_POLL_SECONDS: int = 300
     VIDEO_FPS: int = 12
+    VIDEO_GENERATE_TIMEOUT_SECONDS: int = 600
+    VIDEO_MERGE_TIMEOUT_SECONDS: int = 900
+    VIDEO_TASK_STALE_SECONDS: int = 1800
+    VIDEO_EXPIRED_CLEANUP_BATCH_SIZE: int = 100
     SEEDANCE_API_KEY: str | None = None
 
     # 验证码
@@ -61,6 +65,15 @@ class Settings(BaseSettings):
 
     # 测试账号（生产应关闭）
     ENABLE_TEST_ACCOUNT: bool = True
+
+    # Stripe
+    STRIPE_SECRET_KEY: str | None = None
+    STRIPE_PUBLISHABLE_KEY: str | None = None
+    STRIPE_WEBHOOK_SECRET: str | None = None
+    STRIPE_CURRENCY: str = "cad"
+    STRIPE_CHECKOUT_SUCCESS_URL: str = "http://127.0.0.1:3001/billing/success?session_id={CHECKOUT_SESSION_ID}"
+    STRIPE_CHECKOUT_CANCEL_URL: str = "http://127.0.0.1:3001/billing/cancel"
+    STRIPE_BILLING_PORTAL_RETURN_URL: str = "http://127.0.0.1:3001/billing"
 
     # CORS
     CORS_ORIGINS: List[str] = [

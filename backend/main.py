@@ -12,7 +12,11 @@ from backend.core.config import settings
 from backend.core.transition_effects import load_transition_effects
 from backend.api.v1.router import api_router
 from backend.core.redis_client import close_redis
-from backend.services.video_service import sync_scene_templates_on_startup
+from backend.services.video_service import (
+    cleanup_expired_video_files_on_startup,
+    reconcile_stale_video_tasks_on_startup,
+    sync_scene_templates_on_startup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +25,8 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     load_transition_effects()
     await sync_scene_templates_on_startup()
+    await reconcile_stale_video_tasks_on_startup()
+    await cleanup_expired_video_files_on_startup()
     yield
     await close_redis()
 

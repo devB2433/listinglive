@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useLocale } from "@/components/providers/locale-provider";
 import { register, sendCode } from "@/lib/api";
@@ -19,6 +19,13 @@ export default function RegisterPage() {
   const [message, setMessage] = useState("");
   const [sendingCode, setSendingCode] = useState(false);
   const [registering, setRegistering] = useState(false);
+  const [isFreeTrialFlow, setIsFreeTrialFlow] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    setIsFreeTrialFlow(params.get("source") === "home-free-trial");
+  }, []);
 
   async function handleSendCode() {
     setError("");
@@ -62,10 +69,24 @@ export default function RegisterPage() {
     <div className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
       <div className="w-full max-w-sm space-y-6">
         <div className="space-y-2 text-center">
-          <h1 className="text-2xl font-bold">{translate("auth.register.title")}</h1>
-          <p className="text-sm text-gray-500">{translate("auth.register.subtitle")}</p>
+          {isFreeTrialFlow && (
+            <div className="inline-flex rounded-full bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700">
+              {translate("auth.register.trialBadge")}
+            </div>
+          )}
+          <h1 className="text-2xl font-bold">
+            {isFreeTrialFlow ? translate("auth.register.trialTitle") : translate("auth.register.title")}
+          </h1>
+          <p className="text-sm text-gray-500">
+            {isFreeTrialFlow ? translate("auth.register.trialSubtitle") : translate("auth.register.subtitle")}
+          </p>
         </div>
         <form onSubmit={handleRegister} className="space-y-4 rounded-2xl border bg-white p-6">
+          {isFreeTrialFlow && (
+            <div className="rounded-xl border border-blue-100 bg-blue-50 p-3 text-left">
+              <p className="text-sm text-blue-800">{translate("auth.register.trialNotice")}</p>
+            </div>
+          )}
           <div>
             <label className="mb-1 block text-sm font-medium text-gray-700">{translate("auth.register.username")}</label>
             <input
@@ -127,7 +148,11 @@ export default function RegisterPage() {
             disabled={registering}
             className="w-full rounded-md bg-blue-600 py-2 text-white hover:bg-blue-700 disabled:opacity-50"
           >
-            {registering ? translate("auth.register.submitting") : translate("auth.register.submit")}
+            {registering
+              ? translate("auth.register.submitting")
+              : isFreeTrialFlow
+              ? translate("auth.register.trialSubmit")
+              : translate("auth.register.submit")}
           </button>
         </form>
         <p className="text-center text-sm text-gray-600">

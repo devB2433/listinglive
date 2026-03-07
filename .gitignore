@@ -18,6 +18,7 @@ uploads/
 frontend/.env.local
 frontend/node_modules/
 frontend/.next/
+frontend/.git.local-backup/
 
 .idea/
 .vscode/

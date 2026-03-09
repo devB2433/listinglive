@@ -75,6 +75,34 @@ class CustomerPortalOut(BaseModel):
     portal_url: str
 
 
+class UpgradeSubscriptionRequest(BaseModel):
+    plan_id: UUID
+
+
+class UpgradeSubscriptionPreviewOut(BaseModel):
+    current_plan_type: str
+    current_plan_name: str
+    target_plan_type: str
+    target_plan_name: str
+    amount_due_cents: int
+    currency: str
+    current_period_end: Optional[datetime] = None
+
+
+class UpgradeSubscriptionOut(BaseModel):
+    result_status: str
+    invoice_hosted_url: Optional[str] = None
+    message: Optional[str] = None
+    plan_type: Optional[str] = None
+    quota_per_month: Optional[int] = None
+    quota_used: Optional[int] = None
+    storage_days: Optional[int] = None
+    status: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
 class TaskChargeReconciliationItemOut(BaseModel):
     task_id: UUID
     task_type: str

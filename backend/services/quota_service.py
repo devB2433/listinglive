@@ -18,6 +18,8 @@ ACTIVE_SUBSCRIPTION_STATUSES = ("active", "trialing", "past_due")
 TASK_CHARGE_STATUS_PENDING = "pending"
 TASK_CHARGE_STATUS_CHARGED = "charged"
 TASK_CHARGE_STATUS_SKIPPED = "skipped"
+MIN_DATETIME_UTC = datetime.min.replace(tzinfo=timezone.utc)
+MAX_DATETIME_UTC = datetime.max.replace(tzinfo=timezone.utc)
 
 
 @dataclass
@@ -62,17 +64,30 @@ async def list_active_quota_package_plans(db: AsyncSession) -> list[QuotaPackage
     return list((await db.execute(stmt)).scalars().all())
 
 
+def pick_current_subscription(subscriptions: list[Subscription], *, now: datetime | None = None) -> Subscription | None:
+    current_time = now or datetime.now(timezone.utc)
+    ordered = sorted(
+        subscriptions,
+        key=lambda sub: (
+            sub.current_period_start or MIN_DATETIME_UTC,
+            sub.current_period_end or MAX_DATETIME_UTC,
+            sub.created_at or MIN_DATETIME_UTC,
+        ),
+        reverse=True,
+    )
+    for sub in ordered:
+        if sub.current_period_end is None or sub.current_period_end >= current_time:
+            return sub
+    return None
+
+
 async def get_active_subscription(db: AsyncSession, user_id: UUID) -> Subscription | None:
-    now = datetime.now(timezone.utc)
     stmt = select(Subscription).where(
         Subscription.user_id == user_id,
         Subscription.status.in_(ACTIVE_SUBSCRIPTION_STATUSES),
-    ).order_by(Subscription.created_at.desc())
+    )
     subs = list((await db.execute(stmt)).scalars().all())
-    for sub in subs:
-        if sub.current_period_end is None or sub.current_period_end >= now:
-            return sub
-    return None
+    return pick_current_subscription(subs)
 
 
 async def get_quota_snapshot(db: AsyncSession, user_id: UUID) -> dict:

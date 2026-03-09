@@ -11,6 +11,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.api_errors import AppError
+from backend.core.entitlements import PLAN_TIER_ORDER
+from backend.core.config import settings
 from backend.models.quota import QuotaPackage, QuotaPackagePlan
 from backend.models.stripe_webhook_event import StripeWebhookEvent
 from backend.models.subscription import Subscription, SubscriptionPlan
@@ -21,7 +23,9 @@ from backend.services.stripe_service import (
     create_customer_portal_session,
     create_quota_package_checkout_session,
     create_subscription_checkout_session,
+    create_subscription_update_confirm_session,
     get_or_create_customer_id,
+    preview_subscription_price_change,
     retrieve_subscription,
 )
 
@@ -191,6 +195,102 @@ async def create_portal_link(db: AsyncSession, user: User) -> str:
     return create_customer_portal_session(customer_id=customer_id)
 
 
+async def _get_validated_upgrade_target(
+    db: AsyncSession,
+    user: User,
+    target_plan_id: UUID,
+) -> tuple[Subscription, SubscriptionPlan]:
+    from backend.services.quota_service import get_active_subscription
+
+    subscription = await get_active_subscription(db, user.id)
+    if subscription is None or not subscription.stripe_subscription_id:
+        raise AppError("billing.subscription.noActiveSubscription", status_code=400)
+
+    target_plan = await _get_plan_by_id(db, target_plan_id)
+    if target_plan is None:
+        raise AppError("billing.plan.notFound", status_code=404)
+    if not target_plan.stripe_price_id:
+        raise AppError("billing.plan.notConfigured", status_code=400)
+    if subscription.plan_type == target_plan.plan_type:
+        raise AppError("billing.subscription.alreadyActive", status_code=400)
+
+    current_tier = PLAN_TIER_ORDER.get(subscription.plan_type, 0)
+    target_tier = PLAN_TIER_ORDER.get(target_plan.plan_type, 0)
+    if target_tier <= current_tier:
+        raise AppError("billing.subscription.cannotDowngrade", status_code=400)
+    return subscription, target_plan
+
+
+def _extract_amount_due(invoice: Any) -> int:
+    if isinstance(invoice, dict):
+        raw = invoice.get("amount_due")
+    else:
+        raw = getattr(invoice, "amount_due", None)
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _extract_currency(invoice: Any) -> str:
+    if isinstance(invoice, dict):
+        raw = invoice.get("currency")
+    else:
+        raw = getattr(invoice, "currency", None)
+    return str(raw or "cad").lower()
+
+
+def _extract_latest_invoice(payload: Any) -> dict[str, Any] | None:
+    if isinstance(payload, dict):
+        invoice = payload.get("latest_invoice")
+        return invoice if isinstance(invoice, dict) else None
+    invoice = getattr(payload, "latest_invoice", None)
+    if hasattr(invoice, "to_dict_recursive"):
+        return invoice.to_dict_recursive()
+    return invoice if isinstance(invoice, dict) else None
+
+
+def _extract_payment_intent(invoice: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not invoice:
+        return None
+    payment_intent = invoice.get("payment_intent")
+    return payment_intent if isinstance(payment_intent, dict) else None
+
+
+async def preview_upgrade_subscription(db: AsyncSession, user: User, target_plan_id: UUID) -> dict[str, Any]:
+    subscription, target_plan = await _get_validated_upgrade_target(db, user, target_plan_id)
+    customer_id = await get_or_create_customer_id(db, user)
+    preview = preview_subscription_price_change(
+        customer_id=customer_id,
+        subscription_id=subscription.stripe_subscription_id,
+        new_price_id=target_plan.stripe_price_id,
+    )
+    return {
+        "current_plan_type": subscription.plan_type,
+        "current_plan_name": subscription.plan_type.title(),
+        "target_plan_type": target_plan.plan_type,
+        "target_plan_name": target_plan.name,
+        "amount_due_cents": _extract_amount_due(preview),
+        "currency": _extract_currency(preview),
+        "current_period_end": subscription.current_period_end,
+    }
+
+
+async def upgrade_subscription(db: AsyncSession, user: User, target_plan_id: UUID) -> dict[str, Any]:
+    subscription, target_plan = await _get_validated_upgrade_target(db, user, target_plan_id)
+    customer_id = await get_or_create_customer_id(db, user)
+    confirmation_url = create_subscription_update_confirm_session(
+        customer_id=customer_id,
+        subscription_id=subscription.stripe_subscription_id,
+        new_price_id=target_plan.stripe_price_id,
+    )
+    return {
+        "result_status": "redirect_to_stripe",
+        "invoice_hosted_url": confirmation_url,
+        "message": "subscription_update_confirm",
+    }
+
+
 async def _upsert_subscription_from_payload(db: AsyncSession, payload: Any, event_id: str) -> Subscription:
     user = await _resolve_user_for_stripe_object(db, payload)
 
@@ -206,13 +306,6 @@ async def _upsert_subscription_from_payload(db: AsyncSession, payload: Any, even
 
     stmt = select(Subscription).where(Subscription.stripe_subscription_id == stripe_subscription_id)
     subscription = (await db.execute(stmt)).scalar_one_or_none()
-    if subscription is None:
-        fallback_stmt = (
-            select(Subscription)
-            .where(Subscription.user_id == user.id)
-            .order_by(Subscription.created_at.desc())
-        )
-        subscription = (await db.execute(fallback_stmt)).scalars().first()
 
     period_start = _as_datetime(payload.get("current_period_start") if isinstance(payload, dict) else payload["current_period_start"])
     period_end = _as_datetime(payload.get("current_period_end") if isinstance(payload, dict) else payload["current_period_end"])
@@ -365,7 +458,13 @@ async def process_webhook_payload(db: AsyncSession, payload: bytes, signature: s
     try:
         if event_type == "checkout.session.completed":
             await _handle_checkout_completed(db, event_object, event_id)
-        elif event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
+        elif event_type in {
+            "customer.subscription.created",
+            "customer.subscription.updated",
+            "customer.subscription.deleted",
+            "customer.subscription.pending_update_applied",
+            "customer.subscription.pending_update_expired",
+        }:
             await _handle_subscription_event(db, event_object, event_id)
         elif event_type in {"invoice.paid", "invoice.payment_failed"}:
             await _handle_invoice_event(db, event_object, event_id)

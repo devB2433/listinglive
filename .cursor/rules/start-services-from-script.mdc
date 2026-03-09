@@ -1,0 +1,16 @@
+---
+description: 前后端服务必须通过项目脚本启动
+alwaysApply: true
+---
+
+# 启动前后端服务
+
+- **每次启动或重启前后端服务时，必须通过项目脚本启动**，不要直接运行 `uvicorn` 或 `npm run dev`。
+- 使用的一键启动脚本：
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\scripts\dev\restart-dev.ps1
+  ```
+- 该脚本会：通过 PID 文件精确停止旧进程，启动 postgres/redis，再启动后端（uvicorn --reload）、Celery worker、Celery Beat 和前端，日志输出到 `.runtime/`。
+- 后端启用了 `--reload`，Python 代码修改后会自动重载，**无需手动重启**。
+- 如果已经完成会影响运行结果的修改，并且需要用户继续测试，**直接用项目脚本重启服务，不要再额外询问用户是否要重启**。
+- 仅需停止服务时使用：`powershell -ExecutionPolicy Bypass -File .\scripts\dev\stop-dev.ps1`。

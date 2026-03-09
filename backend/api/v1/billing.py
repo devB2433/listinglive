@@ -1,6 +1,9 @@
 """
 套餐与配额路由
 """
+import logging
+
+import stripe
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,12 +21,17 @@ from backend.schemas.billing import (
     QuotaSnapshotOut,
     SubscriptionPlanOut,
     TaskChargeReconciliationItemOut,
+    UpgradeSubscriptionPreviewOut,
+    UpgradeSubscriptionRequest,
+    UpgradeSubscriptionOut,
 )
 from backend.services.billing_service import (
     create_portal_link,
     create_quota_package_checkout,
     create_subscription_checkout,
+    preview_upgrade_subscription,
     process_webhook_payload,
+    upgrade_subscription,
 )
 from backend.services.entitlement_service import build_user_access_context
 from backend.services.quota_service import (
@@ -32,7 +40,22 @@ from backend.services.quota_service import (
     list_active_subscription_plans,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _classify_stripe_billing_error(exc: stripe.error.StripeError) -> str:
+    message = str(exc).lower()
+    if "subscription update feature in the portal configuration is disabled" in message:
+        return "billing.subscription.upgradeUnavailable"
+    if "there are no changes to confirm" in message:
+        return "billing.subscription.noChangesToConfirm"
+    return "billing.stripe.requestFailed"
+
+
+def _raise_stripe_http_error(action: str, exc: stripe.error.StripeError) -> None:
+    logger.warning("Stripe error during %s: %s", action, exc)
+    raise HTTPException(status_code=502, detail={"code": _classify_stripe_billing_error(exc)})
 
 
 @router.get('/plans', response_model=list[SubscriptionPlanOut])
@@ -118,6 +141,8 @@ async def create_subscription_checkout_session(
         return CheckoutSessionOut(checkout_url=checkout_url)
     except AppError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+    except stripe.error.StripeError as exc:
+        _raise_stripe_http_error("subscription checkout", exc)
 
 
 @router.post("/checkout/quota-package", response_model=CheckoutSessionOut)
@@ -132,6 +157,40 @@ async def create_quota_package_checkout_session(
         return CheckoutSessionOut(checkout_url=checkout_url)
     except AppError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+    except stripe.error.StripeError as exc:
+        _raise_stripe_http_error("quota-package checkout", exc)
+
+
+@router.post("/subscription/upgrade/preview", response_model=UpgradeSubscriptionPreviewOut)
+async def preview_upgrade_subscription_plan(
+    body: UpgradeSubscriptionRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UpgradeSubscriptionPreviewOut:
+    try:
+        preview = await preview_upgrade_subscription(db, user, body.plan_id)
+        await db.commit()
+        return UpgradeSubscriptionPreviewOut(**preview)
+    except AppError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+    except stripe.error.StripeError as exc:
+        _raise_stripe_http_error("subscription upgrade preview", exc)
+
+
+@router.post("/subscription/upgrade", response_model=UpgradeSubscriptionOut)
+async def upgrade_subscription_plan(
+    body: UpgradeSubscriptionRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UpgradeSubscriptionOut:
+    try:
+        result = await upgrade_subscription(db, user, body.plan_id)
+        await db.commit()
+        return UpgradeSubscriptionOut(**result)
+    except AppError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+    except stripe.error.StripeError as exc:
+        _raise_stripe_http_error("subscription upgrade", exc)
 
 
 @router.post("/customer-portal", response_model=CustomerPortalOut)
@@ -145,6 +204,8 @@ async def create_billing_customer_portal(
         return CustomerPortalOut(portal_url=portal_url)
     except AppError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+    except stripe.error.StripeError as exc:
+        _raise_stripe_http_error("customer portal", exc)
 
 
 @router.post("/webhooks/stripe")

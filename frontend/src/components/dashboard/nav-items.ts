@@ -39,14 +39,14 @@ export function getDashboardNavSections(translate: Translate): DashboardNavSecti
           description: translate("dashboard.nav.shortVideoDesc"),
         },
         {
-          href: "/videos/tasks",
-          label: translate("dashboard.nav.tasks"),
-          description: translate("dashboard.nav.tasksDesc"),
-        },
-        {
           href: "/videos/merge",
           label: translate("dashboard.nav.longVideo"),
           description: translate("dashboard.nav.longVideoDesc"),
+        },
+        {
+          href: "/videos/tasks",
+          label: translate("dashboard.nav.tasks"),
+          description: translate("dashboard.nav.tasksDesc"),
         },
       ],
     },
@@ -59,6 +59,11 @@ export function getDashboardNavSections(translate: Translate): DashboardNavSecti
           href: "/account",
           label: translate("dashboard.nav.accountInfo"),
           description: translate("dashboard.nav.accountInfoDesc"),
+        },
+        {
+          href: "/account/logos",
+          label: translate("dashboard.nav.logos"),
+          description: translate("dashboard.nav.logosDesc"),
         },
         {
           href: "/account/language",
@@ -86,6 +91,7 @@ export function getPageTitle(translate: Translate, pathname: string) {
   if (pathname.startsWith("/videos/merge")) return translate("dashboard.titles.videosMerge");
   if (pathname.startsWith("/billing")) return translate("dashboard.titles.billing");
   if (pathname.startsWith("/account/language")) return translate("dashboard.titles.language");
+  if (pathname.startsWith("/account/logos")) return translate("dashboard.titles.logos");
   if (pathname.startsWith("/account")) return translate("dashboard.titles.account");
   if (pathname.startsWith("/notifications")) return translate("dashboard.titles.notifications");
   return translate("dashboard.titles.dashboard");

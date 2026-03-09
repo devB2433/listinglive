@@ -8,8 +8,13 @@ export function hasCapability(quota: QuotaSnapshot, capability: string) {
   return quota.capabilities.includes(capability);
 }
 
+const KNOWN_ACCESS_TIERS = ["signup_bonus", "basic", "pro", "ultimate", "none"] as const;
+
 export function getAccessTierLabel(translate: Translate, accessTier: AccessTier) {
-  return translate(`dashboard.accessTier.${accessTier}`);
+  const tier = accessTier && KNOWN_ACCESS_TIERS.includes(accessTier as (typeof KNOWN_ACCESS_TIERS)[number])
+    ? accessTier
+    : "none";
+  return translate(`dashboard.accessTier.${tier}`);
 }
 
 export function getShortDurationSummary(translate: Translate, quota: QuotaSnapshot) {

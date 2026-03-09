@@ -5,9 +5,12 @@ alwaysApply: true
 
 # Runtime Testing Rules
 
-- If code changes require restarting frontend or backend to verify behavior, restart them automatically.
+- Backend runs with `uvicorn --reload`, so Python code changes take effect automatically without a manual restart.
+- Frontend runs with Next.js HMR, so frontend code changes also take effect automatically.
+- Only run the restart script when changing configuration (.env), dependencies, or when processes are in a broken state.
 - Before starting a dev server, check whether the target port is already occupied by an old instance of the same project.
 - If the expected port is occupied, stop the old process first, then restart on the same intended port.
 - Do not keep switching ports just to work around stale local processes unless the user explicitly asks for a different port.
 - When testing depends on a restarted server, confirm the final frontend/backend URLs in the reply.
 - Prefer keeping frontend and backend URLs stable during a debugging session.
+- PID files are stored in `.runtime/*.pid` for reliable process tracking.

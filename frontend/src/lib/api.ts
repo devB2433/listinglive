@@ -1,4 +1,5 @@
 import { getStoredLocale, translateApiError, t } from "@/lib/locale";
+import { getStoredAccessToken, getStoredRefreshToken, setStoredTokens, clearStoredTokens } from "@/lib/session";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8003";
 const PREFIX = `${API}/api/v1`;
@@ -157,10 +158,16 @@ export type VideoTask = {
 
 async function parseError(res: Response) {
   const e = await res.json().catch(() => ({}));
-  const detail = (e as { detail?: string | { code?: string } }).detail;
+  const detail = (e as { detail?: string | { code?: string; message?: string } }).detail;
   if (detail && typeof detail === "object" && detail.code) {
     const translated = translateApiError(detail.code, getStoredLocale());
-    throw new Error(translated ?? detail.code);
+    if (translated) {
+      throw new Error(translated);
+    }
+    if (detail.message) {
+      throw new Error(detail.message);
+    }
+    throw new Error(detail.code);
   }
   if (typeof detail === "string") {
     throw new Error(detail);
@@ -170,6 +177,43 @@ async function parseError(res: Response) {
 
 function authHeaders(accessToken: string) {
   return { Authorization: `Bearer ${accessToken}` };
+}
+
+let _refreshPromise: Promise<string> | null = null;
+
+async function refreshAccessToken(): Promise<string> {
+  const refreshToken = getStoredRefreshToken();
+  if (!refreshToken) throw new Error("No refresh token");
+  const res = await fetch(`${PREFIX}/auth/refresh`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: refreshToken }),
+  });
+  if (!res.ok) {
+    clearStoredTokens();
+    throw new Error("Token refresh failed");
+  }
+  const data = (await res.json()) as { access_token: string; refresh_token: string };
+  setStoredTokens(data);
+  return data.access_token;
+}
+
+async function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const res = await fetch(input, init);
+  if (res.status !== 401) return res;
+
+  if (!_refreshPromise) {
+    _refreshPromise = refreshAccessToken().finally(() => { _refreshPromise = null; });
+  }
+  let newToken: string;
+  try {
+    newToken = await _refreshPromise;
+  } catch {
+    return res;
+  }
+
+  const retryInit = { ...init, headers: { ...init?.headers, Authorization: `Bearer ${newToken}` } };
+  return fetch(input, retryInit);
 }
 
 export function absoluteApiUrl(path: string) {
@@ -207,7 +251,7 @@ export async function register(username: string, password: string, email: string
 }
 
 export async function getMe(accessToken: string) {
-  const res = await fetch(`${PREFIX}/users/me`, {
+  const res = await authFetch(`${PREFIX}/users/me`, {
     headers: authHeaders(accessToken),
   });
   if (!res.ok) await parseError(res);
@@ -218,7 +262,7 @@ export async function updateMyPreferences(
   accessToken: string,
   body: { preferred_language: "zh-CN" | "en" },
 ) {
-  const res = await fetch(`${PREFIX}/users/me/preferences`, {
+  const res = await authFetch(`${PREFIX}/users/me/preferences`, {
     method: "PATCH",
     headers: {
       ...authHeaders(accessToken),
@@ -231,7 +275,7 @@ export async function updateMyPreferences(
 }
 
 export async function getQuota(accessToken: string) {
-  const res = await fetch(`${PREFIX}/billing/quota`, {
+  const res = await authFetch(`${PREFIX}/billing/quota`, {
     headers: authHeaders(accessToken),
   });
   if (!res.ok) await parseError(res);
@@ -242,7 +286,7 @@ export async function getChargeReconciliation(accessToken: string, options?: { l
   const query = new URLSearchParams();
   if (options?.limit) query.set("limit", String(options.limit));
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  const res = await fetch(`${PREFIX}/billing/reconciliation${suffix}`, {
+  const res = await authFetch(`${PREFIX}/billing/reconciliation${suffix}`, {
     headers: authHeaders(accessToken),
   });
   if (!res.ok) await parseError(res);
@@ -250,7 +294,7 @@ export async function getChargeReconciliation(accessToken: string, options?: { l
 }
 
 export async function createSubscriptionCheckout(accessToken: string, planId: string) {
-  const res = await fetch(`${PREFIX}/billing/checkout/subscription`, {
+  const res = await authFetch(`${PREFIX}/billing/checkout/subscription`, {
     method: "POST",
     headers: {
       ...authHeaders(accessToken),
@@ -263,7 +307,7 @@ export async function createSubscriptionCheckout(accessToken: string, planId: st
 }
 
 export async function createQuotaPackageCheckout(accessToken: string, packagePlanId: string) {
-  const res = await fetch(`${PREFIX}/billing/checkout/quota-package`, {
+  const res = await authFetch(`${PREFIX}/billing/checkout/quota-package`, {
     method: "POST",
     headers: {
       ...authHeaders(accessToken),
@@ -276,7 +320,7 @@ export async function createQuotaPackageCheckout(accessToken: string, packagePla
 }
 
 export async function createCustomerPortal(accessToken: string) {
-  const res = await fetch(`${PREFIX}/billing/customer-portal`, {
+  const res = await authFetch(`${PREFIX}/billing/customer-portal`, {
     method: "POST",
     headers: authHeaders(accessToken),
   });
@@ -284,8 +328,55 @@ export async function createCustomerPortal(accessToken: string) {
   return res.json() as Promise<CustomerPortalResult>;
 }
 
+export type UpgradeSubscriptionResult = {
+  result_status: "redirect_to_stripe" | "applied_now" | "payment_failed";
+  invoice_hosted_url?: string | null;
+  message?: string | null;
+  plan_type?: string | null;
+  quota_per_month?: number | null;
+  quota_used?: number | null;
+  storage_days?: number | null;
+  status?: string | null;
+};
+
+export type UpgradeSubscriptionPreviewResult = {
+  current_plan_type: string;
+  current_plan_name: string;
+  target_plan_type: string;
+  target_plan_name: string;
+  amount_due_cents: number;
+  currency: string;
+  current_period_end?: string | null;
+};
+
+export async function upgradeSubscription(accessToken: string, planId: string) {
+  const res = await authFetch(`${PREFIX}/billing/subscription/upgrade`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(accessToken),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ plan_id: planId }),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<UpgradeSubscriptionResult>;
+}
+
+export async function previewUpgradeSubscription(accessToken: string, planId: string) {
+  const res = await authFetch(`${PREFIX}/billing/subscription/upgrade/preview`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(accessToken),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ plan_id: planId }),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<UpgradeSubscriptionPreviewResult>;
+}
+
 export async function getSubscriptionPlans(accessToken: string) {
-  const res = await fetch(`${PREFIX}/billing/plans`, {
+  const res = await authFetch(`${PREFIX}/billing/plans`, {
     headers: authHeaders(accessToken),
   });
   if (!res.ok) await parseError(res);
@@ -293,7 +384,7 @@ export async function getSubscriptionPlans(accessToken: string) {
 }
 
 export async function getQuotaPackagePlans(accessToken: string) {
-  const res = await fetch(`${PREFIX}/billing/quota-packages/plans`, {
+  const res = await authFetch(`${PREFIX}/billing/quota-packages/plans`, {
     headers: authHeaders(accessToken),
   });
   if (!res.ok) await parseError(res);
@@ -307,7 +398,7 @@ export async function getSceneTemplates(
   const query = new URLSearchParams();
   if (options?.category) query.set("category", options.category);
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  const res = await fetch(`${PREFIX}/videos/scene-templates${suffix}`, {
+  const res = await authFetch(`${PREFIX}/videos/scene-templates${suffix}`, {
     headers: authHeaders(accessToken),
   });
   if (!res.ok) await parseError(res);
@@ -318,7 +409,7 @@ export async function getVideoTasks(accessToken: string, options?: { taskType?: 
   const query = new URLSearchParams();
   if (options?.taskType) query.set("task_type", options.taskType);
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
-  const res = await fetch(`${PREFIX}/videos/tasks${suffix}`, {
+  const res = await authFetch(`${PREFIX}/videos/tasks${suffix}`, {
     headers: authHeaders(accessToken),
   });
   if (!res.ok) await parseError(res);
@@ -326,7 +417,7 @@ export async function getVideoTasks(accessToken: string, options?: { taskType?: 
 }
 
 export async function getUserLogos(accessToken: string) {
-  const res = await fetch(`${PREFIX}/videos/logos`, {
+  const res = await authFetch(`${PREFIX}/videos/logos`, {
     headers: authHeaders(accessToken),
   });
   if (!res.ok) await parseError(res);
@@ -344,7 +435,7 @@ export async function uploadVideoAsset(
   if (kind === "logo" && options?.name) {
     formData.append("name", options.name);
   }
-  const res = await fetch(`${PREFIX}/videos/uploads/${kind}`, {
+  const res = await authFetch(`${PREFIX}/videos/uploads/${kind}`, {
     method: "POST",
     headers: authHeaders(accessToken),
     body: formData,
@@ -354,7 +445,7 @@ export async function uploadVideoAsset(
 }
 
 export async function setDefaultLogo(accessToken: string, logoId: string) {
-  const res = await fetch(`${PREFIX}/videos/logos/${logoId}/default`, {
+  const res = await authFetch(`${PREFIX}/videos/logos/${logoId}/default`, {
     method: "POST",
     headers: authHeaders(accessToken),
   });
@@ -363,7 +454,7 @@ export async function setDefaultLogo(accessToken: string, logoId: string) {
 }
 
 export async function deleteLogo(accessToken: string, logoId: string) {
-  const res = await fetch(`${PREFIX}/videos/logos/${logoId}`, {
+  const res = await authFetch(`${PREFIX}/videos/logos/${logoId}`, {
     method: "DELETE",
     headers: authHeaders(accessToken),
   });
@@ -382,7 +473,7 @@ export async function createShortVideoTask(
     logo_key?: string | null;
   },
 ) {
-  const res = await fetch(`${PREFIX}/videos/tasks/short`, {
+  const res = await authFetch(`${PREFIX}/videos/tasks/short`, {
     method: "POST",
     headers: {
       ...authHeaders(accessToken),
@@ -406,7 +497,7 @@ export async function createLongVideoTask(
     segments?: LongVideoSegmentInput[] | null;
   },
 ) {
-  const res = await fetch(`${PREFIX}/videos/tasks/merge`, {
+  const res = await authFetch(`${PREFIX}/videos/tasks/merge`, {
     method: "POST",
     headers: {
       ...authHeaders(accessToken),
@@ -419,7 +510,7 @@ export async function createLongVideoTask(
 }
 
 export async function downloadVideoTask(accessToken: string, taskId: string) {
-  const res = await fetch(`${PREFIX}/videos/tasks/${taskId}/download`, {
+  const res = await authFetch(`${PREFIX}/videos/tasks/${taskId}/download`, {
     headers: authHeaders(accessToken),
   });
   if (!res.ok) await parseError(res);
@@ -427,7 +518,7 @@ export async function downloadVideoTask(accessToken: string, taskId: string) {
 }
 
 export async function retryVideoTask(accessToken: string, taskId: string) {
-  const res = await fetch(`${PREFIX}/videos/tasks/${taskId}/retry`, {
+  const res = await authFetch(`${PREFIX}/videos/tasks/${taskId}/retry`, {
     method: "POST",
     headers: authHeaders(accessToken),
   });

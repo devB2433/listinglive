@@ -21,7 +21,7 @@ class EntitlementServiceTests(unittest.TestCase):
         self.assertTrue(has_capability(context, "short_video_create"))
         self.assertTrue(has_capability(context, "merge_per_image_template"))
         self.assertTrue(has_capability(context, "transition_effect"))
-        self.assertFalse(context.can_purchase_quota_package)
+        self.assertTrue(context.can_purchase_quota_package)
         self.assertTrue(context.limits.short_duration_editable)
         self.assertEqual(context.limits.allowed_resolutions, ("1080p",))
 

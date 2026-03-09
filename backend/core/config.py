@@ -95,6 +95,7 @@ class Settings(BaseSettings):
     STRIPE_CHECKOUT_SUCCESS_URL: str = "http://127.0.0.1:3001/billing/success?session_id={CHECKOUT_SESSION_ID}"
     STRIPE_CHECKOUT_CANCEL_URL: str = "http://127.0.0.1:3001/billing/cancel"
     STRIPE_BILLING_PORTAL_RETURN_URL: str = "http://127.0.0.1:3001/billing"
+    STRIPE_BILLING_PORTAL_CONFIGURATION_ID: str | None = None
 
     # CORS
     CORS_ORIGINS: List[str] = [

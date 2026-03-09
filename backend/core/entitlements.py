@@ -27,6 +27,12 @@ PLAN_TYPE_BASIC = "basic"
 PLAN_TYPE_PRO = "pro"
 PLAN_TYPE_ULTIMATE = "ultimate"
 
+PLAN_TIER_ORDER: dict[str, int] = {
+    PLAN_TYPE_BASIC: 1,
+    PLAN_TYPE_PRO: 2,
+    PLAN_TYPE_ULTIMATE: 3,
+}
+
 ALL_RESOLUTIONS = ("1080p",)
 ALL_ASPECT_RATIOS = ("16:9", "9:16", "1:1", "adaptive")
 BASIC_SHORT_VIDEO_DURATION_SECONDS = 4
@@ -87,7 +93,7 @@ class AccessContext:
 
 ENTITLEMENTS_BY_TIER: dict[str, TierEntitlement] = {
     ACCESS_TIER_SIGNUP_BONUS: TierEntitlement(
-        capabilities=frozenset(BASIC_FEATURE_CAPABILITIES | ADVANCED_FEATURE_CAPABILITIES),
+        capabilities=frozenset(BASIC_FEATURE_CAPABILITIES | ADVANCED_FEATURE_CAPABILITIES | {CAPABILITY_BUY_QUOTA_PACKAGE}),
         limits=CapabilityLimits(
             short_fixed_duration_seconds=None,
             short_duration_editable=True,

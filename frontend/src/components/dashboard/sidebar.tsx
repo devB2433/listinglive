@@ -54,7 +54,12 @@ function NavList({
   return (
     <div className={mobile ? "flex flex-wrap gap-2" : "ml-3 border-l border-gray-100 pl-3 space-y-1"}>
       {items.map((item) => {
-        const active = pathname === item.href || (item.href !== "/dashboard" && pathname.startsWith(`${item.href}/`));
+        const hasChildMatch = items.some(
+          (o) => o !== item && o.href.startsWith(item.href + "/") && pathname.startsWith(o.href),
+        );
+        const active =
+          pathname === item.href ||
+          (item.href !== "/dashboard" && pathname.startsWith(`${item.href}/`) && !hasChildMatch);
 
         return (
           <Link

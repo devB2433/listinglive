@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import { Cormorant_Garamond } from "next/font/google";
 
 import { useLocale } from "@/components/providers/locale-provider";
 
@@ -28,12 +27,6 @@ type ComparisonRow = {
   pro: string;
   ultimate: string;
 };
-
-const sloganFont = Cormorant_Garamond({
-  subsets: ["latin"],
-  weight: ["600", "700"],
-  style: ["italic", "normal"],
-});
 
 export default function HomePage() {
   const { locale, setLocale, translate } = useLocale();
@@ -170,7 +163,7 @@ export default function HomePage() {
         <section className="mx-auto w-full max-w-7xl px-4 pb-20 pt-10 lg:pt-16">
           <div className="mx-auto max-w-6xl text-center">
             <p
-              className={`${sloganFont.className} overflow-visible bg-[linear-gradient(135deg,rgba(15,23,42,1),rgba(29,78,216,0.92),rgba(15,23,42,0.92))] bg-clip-text px-2 pb-3 text-4xl font-semibold italic leading-[1.15] text-transparent sm:text-5xl lg:text-7xl`}
+              className="overflow-visible bg-[linear-gradient(135deg,rgba(15,23,42,1),rgba(29,78,216,0.92),rgba(15,23,42,0.92))] bg-clip-text px-2 pb-3 font-serif text-4xl font-semibold italic leading-[1.15] text-transparent sm:text-5xl lg:text-7xl"
             >
               {translate("home.slogan")}
             </p>

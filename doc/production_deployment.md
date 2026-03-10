@@ -119,6 +119,11 @@ sudo ./scripts/prod/init-host.sh
 3. `/opt/listinglive/config/stripe_price_ids.local.json`
 
 第三个文件只有在你想用“本地 JSON 文件管理 Stripe Price ID，再同步到数据库”的方式时才需要。系统正常运行并不强制依赖它。
+如果你需要在生产容器里执行同步脚本，`api` 容器会只读挂载整个 `/opt/listinglive/config` 到 `/run/listinglive/config`，因此该文件在容器内可通过下面的路径访问：
+
+```text
+/run/listinglive/config/stripe_price_ids.local.json
+```
 
 ### 6.1 主配置文件
 

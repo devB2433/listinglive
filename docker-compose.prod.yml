@@ -74,6 +74,7 @@ services:
     volumes:
       - ${APP_STORAGE_ROOT:-/opt/listinglive/data/storage}:/data/storage
       - ${AI_PROVIDER_TOML_PATH:-/opt/listinglive/config/ai_provider.toml}:/run/listinglive/ai_provider.toml:ro
+      - ${APP_CONFIG_ROOT:-/opt/listinglive/config}:/run/listinglive/config:ro
     healthcheck:
       test:
         [

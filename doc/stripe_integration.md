@@ -161,6 +161,19 @@ STRIPE_BILLING_PORTAL_RETURN_URL=http://127.0.0.1:3001/billing
 
 4. 可选预检查：加 `--dry-run` 只打印变更不写库。
 
+生产环境建议把文件维护在：
+
+```text
+/opt/listinglive/config/stripe_price_ids.local.json
+```
+
+生产容器里会把该目录只读挂载到 `/run/listinglive/config`，因此可直接执行：
+
+```bash
+docker compose --env-file /opt/listinglive/config/.env.prod -f docker-compose.prod.yml exec api python scripts/billing/sync_stripe_price_ids.py --config /run/listinglive/config/stripe_price_ids.local.json --dry-run
+docker compose --env-file /opt/listinglive/config/.env.prod -f docker-compose.prod.yml exec api python scripts/billing/sync_stripe_price_ids.py --config /run/listinglive/config/stripe_price_ids.local.json
+```
+
 ### 3.4 Billing Portal
 
 1. Stripe Dashboard → **Settings** → **Billing** → **Customer portal**。

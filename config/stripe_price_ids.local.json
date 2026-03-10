@@ -1,0 +1,12 @@
+{
+  "subscriptions": {
+    "basic": "replace_with_basic_price_id",
+    "pro": "replace_with_pro_price_id",
+    "ultimate": "replace_with_ultimate_price_id"
+  },
+  "quota_packages": {
+    "pack_10": "replace_with_pack_10_price_id",
+    "pack_50": "replace_with_pack_50_price_id",
+    "pack_150": "replace_with_pack_150_price_id"
+  }
+}

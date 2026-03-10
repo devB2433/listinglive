@@ -1,4 +1,5 @@
 .env
+.env.prod
 config/ai_provider.toml
 .venv/
 venv/

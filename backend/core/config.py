@@ -91,6 +91,19 @@ class Settings(BaseSettings):
     VERIFY_CODE_EXPIRE_SECONDS: int = 300
     VERIFY_CODE_RATE_LIMIT_SECONDS: int = 60
 
+    # 邮件发送（生产建议使用 SMTP）
+    MAIL_PROVIDER: str = ""
+    MAIL_FROM: str = ""
+    MAIL_FROM_NAME: str = "ListingLive"
+    MAIL_REPLY_TO: str | None = None
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str | None = None
+    SMTP_USE_TLS: bool = True
+    SMTP_USE_SSL: bool = False
+    SMTP_TIMEOUT_SECONDS: int = 20
+
     # 测试账号（生产应关闭）
     ENABLE_TEST_ACCOUNT: bool = True
 

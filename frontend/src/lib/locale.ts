@@ -241,6 +241,8 @@ const messages = {
       },
       errors: {
         "auth.sendCode.rateLimited": "发送过于频繁，请稍后再试。",
+        "auth.sendCode.mailNotConfigured": "邮件发送尚未配置完成，请稍后再试或联系管理员。",
+        "auth.sendCode.mailFailed": "验证码邮件发送失败，请稍后重试。",
         "auth.register.invalidCode": "验证码错误或已过期。",
         "auth.register.userExists": "用户名或邮箱已被注册。",
         "auth.register.usernameExists": "用户名已被占用，请更换后重试。",
@@ -1105,6 +1107,8 @@ const messages = {
       },
       errors: {
         "auth.sendCode.rateLimited": "You're sending codes too frequently. Please try again later.",
+        "auth.sendCode.mailNotConfigured": "Email delivery is not configured yet. Please try again later or contact support.",
+        "auth.sendCode.mailFailed": "Failed to send the verification email. Please try again later.",
         "auth.register.invalidCode": "The verification code is invalid or expired.",
         "auth.register.userExists": "The username or email is already registered.",
         "auth.register.usernameExists": "This username is already taken. Please choose another one.",

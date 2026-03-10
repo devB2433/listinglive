@@ -1,0 +1,10 @@
+[Unit]
+Description=Run ListingLive backup on schedule
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+Unit=listinglive-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.core.api_errors import AppError
 from backend.core.config import settings
 from backend.models.user import User
+from backend.services.email_service import send_verification_code_email
 from backend.services.invite_code_service import mark_invite_code_used, normalize_invite_code, validate_invite_code
 
 VERIFY_CODE_KEY_PREFIX = "verify_code:"
@@ -66,7 +67,7 @@ def _make_token(sub: str, expires_delta: timedelta, token_type: str = "access") 
 
 
 async def send_verify_code(redis: Redis, email: str) -> str:
-    """发送验证码：写入 Redis，防刷（同邮箱 60s 内只能发一次）。实际发邮件在后续通知模块接入。"""
+    """发送验证码：写入 Redis，防刷（同邮箱 60s 内只能发一次）。"""
     email = _normalize_auth_identity(email)
     rate_key = f"{VERIFY_CODE_RATE_PREFIX}{email}"
     if await redis.get(rate_key):
@@ -75,9 +76,14 @@ async def send_verify_code(redis: Redis, email: str) -> str:
     key = f"{VERIFY_CODE_KEY_PREFIX}{email}"
     await redis.setex(key, settings.VERIFY_CODE_EXPIRE_SECONDS, code)
     await redis.setex(rate_key, settings.VERIFY_CODE_RATE_LIMIT_SECONDS, "1")
-    # TODO: 调用邮件服务发送 code 到 email
-    # 开发阶段先直接打印到后端控制台，便于假邮箱联调
-    print(f"[DEV] 验证码 {email} -> {code}")
+    try:
+        await send_verification_code_email(email, code)
+    except AppError:
+        await redis.delete(key)
+        await redis.delete(rate_key)
+        raise
+    if settings.DEBUG:
+        print(f"[DEV] 验证码 {email} -> {code}")
     return code
 
 

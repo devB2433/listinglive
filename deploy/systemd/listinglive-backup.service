@@ -1,0 +1,13 @@
+[Unit]
+Description=ListingLive production backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/listinglive/app
+Environment=LISTINGLIVE_ENV_FILE=/opt/listinglive/config/.env.prod
+ExecStart=/opt/listinglive/app/scripts/prod/backup.sh
+
+[Install]
+WantedBy=multi-user.target

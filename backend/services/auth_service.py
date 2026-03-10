@@ -140,7 +140,14 @@ async def register(
     return user
 
 
-async def authenticate_user(db: AsyncSession, username_or_email: str, password: str) -> User | None:
+async def authenticate_user(
+    db: AsyncSession,
+    username_or_email: str,
+    password: str,
+    *,
+    allow_root: bool = True,
+    allow_root_when_test_account_disabled: bool = False,
+) -> User | None:
     """用户名或邮箱 + 密码 校验"""
     normalized_identity = _normalize_auth_identity(username_or_email)
     stmt = select(User).where(
@@ -150,8 +157,11 @@ async def authenticate_user(db: AsyncSession, username_or_email: str, password: 
     user = result.scalar_one_or_none()
     if not user or not user.is_active():
         return None
-    if user.username == "root" and not settings.ENABLE_TEST_ACCOUNT:
-        return None
+    if user.username == "root":
+        if not allow_root:
+            return None
+        if not settings.ENABLE_TEST_ACCOUNT and not allow_root_when_test_account_disabled:
+            return None
     if not _verify_password(password, user.password_hash):
         return None
     return user

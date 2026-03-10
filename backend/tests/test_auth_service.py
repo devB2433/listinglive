@@ -101,6 +101,47 @@ class AuthServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(authenticated, user)
 
+    async def test_authenticate_user_rejects_root_when_not_allowed(self) -> None:
+        db = AsyncMock()
+        user = User(
+            username="root",
+            email="root@localhost",
+            password_hash="stored-hash",
+            email_verified=True,
+            preferred_language="en",
+            status="active",
+        )
+        db.execute = AsyncMock(return_value=_FakeResult(user))
+
+        with patch("backend.services.auth_service._verify_password", return_value=True):
+            authenticated = await authenticate_user(db, "root", "Password!1", allow_root=False)
+
+        self.assertIsNone(authenticated)
+
+    async def test_authenticate_user_allows_root_for_admin_login_when_test_account_disabled(self) -> None:
+        db = AsyncMock()
+        user = User(
+            username="root",
+            email="root@localhost",
+            password_hash="stored-hash",
+            email_verified=True,
+            preferred_language="en",
+            status="active",
+        )
+        db.execute = AsyncMock(return_value=_FakeResult(user))
+
+        with patch("backend.services.auth_service._verify_password", return_value=True):
+            with patch("backend.services.auth_service.settings", SimpleNamespace(ENABLE_TEST_ACCOUNT=False)):
+                authenticated = await authenticate_user(
+                    db,
+                    "root",
+                    "Password!1",
+                    allow_root=True,
+                    allow_root_when_test_account_disabled=True,
+                )
+
+        self.assertIs(authenticated, user)
+
     def test_admin_mfa_verify_is_skipped_when_not_enabled(self) -> None:
         user = User(
             username="root",

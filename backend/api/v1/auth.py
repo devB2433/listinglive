@@ -76,7 +76,7 @@ async def login(
     db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
     try:
-        user = await authenticate_user(db, body.username_or_email, body.password)
+        user = await authenticate_user(db, body.username_or_email, body.password, allow_root=False)
     except Exception as e:
         logger.exception("login authenticate_user error")
         if settings.DEBUG:

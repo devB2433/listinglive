@@ -19,7 +19,13 @@ async def admin_login(
     db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
     try:
-        user = await authenticate_user(db, body.username_or_email, body.password)
+        user = await authenticate_user(
+            db,
+            body.username_or_email,
+            body.password,
+            allow_root=True,
+            allow_root_when_test_account_disabled=True,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

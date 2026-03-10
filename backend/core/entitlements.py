@@ -94,10 +94,10 @@ class AccessContext:
 
 ENTITLEMENTS_BY_TIER: dict[str, TierEntitlement] = {
     ACCESS_TIER_SIGNUP_BONUS: TierEntitlement(
-        capabilities=frozenset(BASIC_FEATURE_CAPABILITIES | ADVANCED_FEATURE_CAPABILITIES | {CAPABILITY_BUY_QUOTA_PACKAGE}),
+        capabilities=frozenset(BASIC_FEATURE_CAPABILITIES | {CAPABILITY_BUY_QUOTA_PACKAGE}),
         limits=CapabilityLimits(
-            short_fixed_duration_seconds=None,
-            short_duration_editable=True,
+            short_fixed_duration_seconds=BASIC_SHORT_VIDEO_DURATION_SECONDS,
+            short_duration_editable=False,
             allowed_resolutions=ALL_RESOLUTIONS,
             allowed_aspect_ratios=ALL_ASPECT_RATIOS,
             storage_days_display=None,

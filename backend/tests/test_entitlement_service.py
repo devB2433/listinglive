@@ -5,7 +5,7 @@ from backend.services.entitlement_service import build_access_context_from_snaps
 
 
 class EntitlementServiceTests(unittest.TestCase):
-    def test_signup_bonus_grants_full_feature_access(self) -> None:
+    def test_signup_bonus_matches_basic_feature_access(self) -> None:
         context = build_access_context_from_snapshot(
             {
                 "subscription": None,
@@ -20,10 +20,11 @@ class EntitlementServiceTests(unittest.TestCase):
 
         self.assertEqual(context.access_tier, "signup_bonus")
         self.assertTrue(has_capability(context, "short_video_create"))
-        self.assertTrue(has_capability(context, "merge_per_image_template"))
-        self.assertTrue(has_capability(context, "transition_effect"))
         self.assertTrue(context.can_purchase_quota_package)
-        self.assertTrue(context.limits.short_duration_editable)
+        self.assertEqual(context.limits.short_fixed_duration_seconds, 4)
+        self.assertFalse(context.limits.short_duration_editable)
+        self.assertFalse(has_capability(context, "merge_per_image_template"))
+        self.assertFalse(has_capability(context, "transition_effect"))
         self.assertEqual(context.limits.allowed_resolutions, ("1080p",))
 
     def test_basic_subscription_keeps_fixed_short_duration(self) -> None:
@@ -104,7 +105,7 @@ class EntitlementServiceTests(unittest.TestCase):
         self.assertFalse(has_capability(context, "merge_per_image_template"))
         self.assertFalse(context.limits.short_duration_editable)
 
-    def test_invite_bonus_keeps_trial_access_available(self) -> None:
+    def test_invite_bonus_keeps_basic_access_available(self) -> None:
         context = build_access_context_from_snapshot(
             {
                 "subscription": None,
@@ -120,6 +121,8 @@ class EntitlementServiceTests(unittest.TestCase):
         self.assertEqual(context.access_tier, "signup_bonus")
         self.assertEqual(context.invite_bonus_remaining, 15)
         self.assertTrue(has_capability(context, "short_video_create"))
+        self.assertFalse(has_capability(context, "merge_per_image_template"))
+        self.assertFalse(context.limits.short_duration_editable)
 
 
 if __name__ == "__main__":

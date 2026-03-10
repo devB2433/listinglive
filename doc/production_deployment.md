@@ -376,11 +376,41 @@ LISTINGLIVE_ENV_FILE=/opt/listinglive/config/.env.prod ./scripts/prod/deploy.sh
 
 ## 9. 一键更新
 
+### 最简方式：更新脚本
+
+日常升级最推荐直接执行：
+
+```bash
+cd /opt/listinglive/app
+bash ./scripts/prod/update.sh
+```
+
+这个脚本会默认使用：
+
+- `/opt/listinglive/config/.env.prod`
+- 当前仓库默认分支
+- 生产部署脚本 `scripts/prod/deploy.sh`
+
+常见用法：
+
+```bash
+cd /opt/listinglive/app
+bash ./scripts/prod/update.sh --skip-backup
+bash ./scripts/prod/update.sh --ref <git-ref>
+bash ./scripts/prod/update.sh --env-file /opt/listinglive/config/.env.prod --skip-backup
+```
+
+说明：
+
+- `update.sh` 是给运维日常使用的更短入口
+- 它底层仍然调用 `deploy.sh`
+- 脚本已对 Linux 上常见的脚本权限位变化做兼容，避免因为 `scripts/prod/*.sh` 的 mode 变化导致更新被错误拦截
+
 ### 方式 A：脚本自己拉代码
 
 ```bash
 cd /opt/listinglive/app
-LISTINGLIVE_ENV_FILE=/opt/listinglive/config/.env.prod ./scripts/prod/deploy.sh
+bash ./scripts/prod/update.sh
 ```
 
 ### 方式 B：你先自己 `git pull`

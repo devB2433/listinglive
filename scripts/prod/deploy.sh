@@ -39,18 +39,18 @@ ensure_prod_dirs
 PREVIOUS_REF="$(current_git_ref)"
 
 if [[ "${SKIP_PULL}" -eq 0 ]]; then
-  git -C "${ROOT_DIR}" diff --quiet || fail "Working tree is dirty. Commit or stash changes before deploy."
-  git -C "${ROOT_DIR}" diff --cached --quiet || fail "Staged changes detected. Clean the repository before deploy."
-  git -C "${ROOT_DIR}" fetch origin
+  git -c core.filemode=false -C "${ROOT_DIR}" diff --quiet || fail "Working tree is dirty. Commit or stash changes before deploy."
+  git -c core.filemode=false -C "${ROOT_DIR}" diff --cached --quiet || fail "Staged changes detected. Clean the repository before deploy."
+  git -c core.filemode=false -C "${ROOT_DIR}" fetch origin
 
   if [[ -n "${TARGET_REF}" ]]; then
-    git -C "${ROOT_DIR}" checkout "${TARGET_REF}"
+    git -c core.filemode=false -C "${ROOT_DIR}" checkout "${TARGET_REF}"
   else
-    git -C "${ROOT_DIR}" checkout "${APP_GIT_BRANCH}"
-    git -C "${ROOT_DIR}" pull --ff-only origin "${APP_GIT_BRANCH}"
+    git -c core.filemode=false -C "${ROOT_DIR}" checkout "${APP_GIT_BRANCH}"
+    git -c core.filemode=false -C "${ROOT_DIR}" pull --ff-only origin "${APP_GIT_BRANCH}"
   fi
 elif [[ -n "${TARGET_REF}" ]]; then
-  git -C "${ROOT_DIR}" checkout "${TARGET_REF}"
+  git -c core.filemode=false -C "${ROOT_DIR}" checkout "${TARGET_REF}"
 fi
 
 DEPLOYED_REF="$(current_git_ref)"

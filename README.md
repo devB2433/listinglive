@@ -24,6 +24,8 @@ ListingLive is a real-estate content platform that turns listing photos into mot
 - Copy `.env.example` to `.env` for local development
 - Copy `config/ai_provider.toml.example` to `config/ai_provider.toml` and fill in the active provider config
 - For production, use `.env.prod.example` together with the deployment runbook
+- Queue throttling for third-party video generation is controlled by `VIDEO_PROVIDER_CONCURRENCY_LIMIT`; keep it below the provider hard limit
+- `LOCAL_VIDEO_PROVIDER_DELAY_SECONDS` is only for local load testing and should stay `0` outside simulated queue tests
 
 ## Documentation
 

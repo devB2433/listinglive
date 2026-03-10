@@ -998,16 +998,10 @@ async def wait_for_task_execution_turn(db: AsyncSession, task_id: UUID, *, allow
             redis = await get_redis()
         except Exception:
             logger.warning(
-                "Failed to connect to Redis for task queue ordering. Proceeding without the FIFO gate.",
+                "Failed to connect to Redis for task queue ordering. Rejecting provider execution to avoid overrunning the third-party concurrency limit.",
                 exc_info=True,
             )
-            task.status = VIDEO_TASK_STATUS_PROCESSING
-            task.error_message = None
-            task.processing_started_at = task.processing_started_at or now
-            task.finished_at = None
-            await db.commit()
-            await db.refresh(task)
-            return task
+            raise RuntimeError("videos.task.queueUnavailable")
 
         lock = redis.lock(
             PROVIDER_QUEUE_LOCK_KEY,

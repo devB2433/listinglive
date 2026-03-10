@@ -1,0 +1,9 @@
+[video]
+provider = "local"
+transport = "rest"
+request_style = "prompt_flags"
+camera_fixed = false
+watermark = false
+timeout_seconds = 60
+download_timeout_seconds = 300
+default_model = "local-loadtest"

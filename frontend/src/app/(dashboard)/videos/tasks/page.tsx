@@ -313,7 +313,10 @@ function PendingTaskCard({
     <div className="rounded-2xl border bg-white p-5">
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div className="min-w-0">
-          <p className="font-medium text-gray-900">{renderPendingTaskStatus(translate, task.status)}</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="font-medium text-gray-900">{renderPendingTaskStatus(translate, task.status)}</p>
+            {isPendingTaskRunning(task.status) ? <RunningStatusIndicator /> : null}
+          </div>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-gray-600">
             <p>{translate("dashboard.tasks.taskType", { value: renderTaskType(translate, task.task_type) })}</p>
             {renderServiceTierBadge(translate, task.service_tier)}
@@ -366,6 +369,7 @@ function TaskCard({
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <p className="font-medium text-gray-900">{renderStatus(translate, task.status, task.task_type, hasFailedLongSegments)}</p>
+            {isTaskRunning(task.status, task.task_type, hasFailedLongSegments) ? <RunningStatusIndicator /> : null}
             {renderServiceTierBadge(translate, task.service_tier)}
           </div>
           <p className="mt-1 text-sm text-gray-600">{translate("dashboard.tasks.taskType", { value: renderTaskType(translate, task.task_type) })}</p>
@@ -505,6 +509,33 @@ function renderStatus(
 function renderPendingTaskStatus(translate: (key: string) => string, status: PendingTaskView["status"]) {
   if (status === "uploading") return translate("dashboard.tasks.uploading");
   return translate("dashboard.tasks.failed");
+}
+
+function isPendingTaskRunning(status: PendingTaskView["status"]) {
+  return status === "uploading";
+}
+
+function isTaskRunning(status: string, taskType?: string, hasFailedLongSegments = false) {
+  if (hasFailedLongSegments) return false;
+  if (status === "queued") return true;
+  if (["processing", "submitting", "submitted", "provider_processing"].includes(status)) return true;
+  if (status === "merging" || status === "finalizing") {
+    return taskType === "long" || taskType === "short";
+  }
+  return false;
+}
+
+function RunningStatusIndicator() {
+  return (
+    <span
+      aria-hidden="true"
+      className="inline-flex items-end gap-1 rounded-full border border-blue-200/80 bg-blue-50/80 px-2 py-1"
+    >
+      <span className="h-2 w-1 animate-pulse rounded-full bg-blue-500" />
+      <span className="h-3 w-1 animate-pulse rounded-full bg-blue-500 [animation-delay:120ms]" />
+      <span className="h-2.5 w-1 animate-pulse rounded-full bg-blue-500 [animation-delay:240ms]" />
+    </span>
+  );
 }
 
 function renderChargeStatus(translate: (key: string) => string, status: string) {

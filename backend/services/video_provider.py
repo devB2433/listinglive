@@ -161,6 +161,7 @@ class LocalVideoProvider(VideoProvider):
 
     def __init__(self) -> None:
         self.fps = settings.VIDEO_FPS
+        self.simulated_delay_seconds = max(settings.LOCAL_VIDEO_PROVIDER_DELAY_SECONDS, 0)
 
     async def generate_image_to_video(
         self,
@@ -173,6 +174,8 @@ class LocalVideoProvider(VideoProvider):
         duration_seconds: int,
         logo_path: Path | None = None,
     ) -> GeneratedVideo:
+        if self.simulated_delay_seconds > 0:
+            await asyncio.sleep(self.simulated_delay_seconds)
         await asyncio.to_thread(
             self._generate_sync,
             input_path,

@@ -152,6 +152,7 @@ sudo ./scripts/prod/init-host.sh
 - `SMTP_HOST`
 - `SMTP_USERNAME`
 - `SMTP_PASSWORD`
+- `VIDEO_PROVIDER_CONCURRENCY_LIMIT`
 
 如果你当前已经确定正式主域名是 `listinglive.ca`，那么下面这些值可以先直接按这个口径填写：
 
@@ -168,6 +169,38 @@ SMTP_USERNAME=hello@listinglive.ca
 ```
 
 上面这部分属于“已知可先写死”的配置；真正还需要你后续补齐的是密钥、密码、SMTP 主机等敏感参数。
+
+### 6.1.1 第三方并发限制建议
+
+如果你的上游视频生成服务明确给出的并发上限是 **10**，建议本地队列门不要直接也设成 `10`，而是先从：
+
+```dotenv
+VIDEO_PROVIDER_CONCURRENCY_LIMIT=8
+```
+
+开始。
+
+原因：
+
+- 给第三方偶发抖动、超时重试、恢复中的任务留余量
+- 避免在 Redis 刚恢复、worker 重启、短时间批量提交时直接把上游打满
+- 用户优先看到 ListingLive 自己的本地排队，而不是全部挤进上游黑盒排队
+
+当前代码已经改成：**Redis 队列门不可用时，不再放行任务继续请求第三方**，而是直接失败并提示稍后重试。这样可以避免限流保护失效时把第三方并发冲爆。
+
+### 6.1.2 本地压测专用延时参数
+
+下面这个参数只用于开发机或压测环境模拟“单任务处理很久”的情况：
+
+```dotenv
+LOCAL_VIDEO_PROVIDER_DELAY_SECONDS=0
+```
+
+说明：
+
+- 生产环境保持 `0`
+- 例如设成 `120`，表示本地 `local` provider 每个任务在真正生成前额外等待 120 秒
+- 这个参数只对本地 provider 生效，不会改变正式第三方 provider 的真实行为
 
 ### 6.2 AI provider 配置文件
 

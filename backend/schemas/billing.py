@@ -52,6 +52,7 @@ class QuotaSnapshotOut(BaseModel):
     package_remaining: int
     paid_package_remaining: int
     signup_bonus_remaining: int
+    invite_bonus_remaining: int
     total_available: int
     access_tier: str
     capabilities: list[str]

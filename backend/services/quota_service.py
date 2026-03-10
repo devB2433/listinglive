@@ -14,6 +14,8 @@ from backend.models.video_task import VideoTask
 
 SIGNUP_BONUS_PACKAGE_TYPE = "signup_bonus"
 SIGNUP_BONUS_QUOTA = 5
+INVITE_BONUS_PACKAGE_TYPE = "invite_bonus"
+INVITE_BONUS_QUOTA = 15
 ACTIVE_SUBSCRIPTION_STATUSES = ("active", "trialing", "past_due")
 TASK_CHARGE_STATUS_PENDING = "pending"
 TASK_CHARGE_STATUS_CHARGED = "charged"
@@ -27,10 +29,11 @@ class QuotaChargeBreakdown:
     subscription_used: int = 0
     paid_package_used: int = 0
     signup_bonus_used: int = 0
+    invite_bonus_used: int = 0
 
     @property
     def total_used(self) -> int:
-        return self.subscription_used + self.paid_package_used + self.signup_bonus_used
+        return self.subscription_used + self.paid_package_used + self.signup_bonus_used + self.invite_bonus_used
 
 
 async def ensure_signup_bonus(db: AsyncSession, user_id: UUID) -> None:
@@ -46,6 +49,27 @@ async def ensure_signup_bonus(db: AsyncSession, user_id: UUID) -> None:
             user_id=user_id,
             package_type=SIGNUP_BONUS_PACKAGE_TYPE,
             quota_total=SIGNUP_BONUS_QUOTA,
+            quota_used=0,
+            expires_at=None,
+            stripe_payment_intent_id=None,
+        )
+    )
+    await db.flush()
+
+
+async def ensure_invite_bonus(db: AsyncSession, user_id: UUID) -> None:
+    stmt = select(QuotaPackage).where(
+        QuotaPackage.user_id == user_id,
+        QuotaPackage.package_type == INVITE_BONUS_PACKAGE_TYPE,
+    )
+    existing = (await db.execute(stmt)).scalar_one_or_none()
+    if existing:
+        return
+    db.add(
+        QuotaPackage(
+            user_id=user_id,
+            package_type=INVITE_BONUS_PACKAGE_TYPE,
+            quota_total=INVITE_BONUS_QUOTA,
             quota_used=0,
             expires_at=None,
             stripe_payment_intent_id=None,
@@ -100,6 +124,7 @@ async def get_quota_snapshot(db: AsyncSession, user_id: UUID) -> dict:
     package_remaining = 0
     paid_package_remaining = 0
     signup_bonus_remaining = 0
+    invite_bonus_remaining = 0
     for package in packages:
         if package.expires_at is not None and package.expires_at < now:
             continue
@@ -108,6 +133,8 @@ async def get_quota_snapshot(db: AsyncSession, user_id: UUID) -> dict:
         package_remaining += remaining
         if package.package_type == SIGNUP_BONUS_PACKAGE_TYPE:
             signup_bonus_remaining += remaining
+        elif package.package_type == INVITE_BONUS_PACKAGE_TYPE:
+            invite_bonus_remaining += remaining
         else:
             paid_package_remaining += remaining
 
@@ -121,6 +148,7 @@ async def get_quota_snapshot(db: AsyncSession, user_id: UUID) -> dict:
         "package_remaining": package_remaining,
         "paid_package_remaining": paid_package_remaining,
         "signup_bonus_remaining": signup_bonus_remaining,
+        "invite_bonus_remaining": invite_bonus_remaining,
         "total_available": subscription_remaining + package_remaining,
         "packages": valid_packages,
     }
@@ -172,6 +200,8 @@ async def consume_quota(db: AsyncSession, user_id: UUID, amount: int) -> QuotaCh
         remaining -= use
         if package.package_type == SIGNUP_BONUS_PACKAGE_TYPE:
             breakdown.signup_bonus_used += use
+        elif package.package_type == INVITE_BONUS_PACKAGE_TYPE:
+            breakdown.invite_bonus_used += use
         else:
             breakdown.paid_package_used += use
         if remaining <= 0:
@@ -192,6 +222,8 @@ async def refund_quota(db: AsyncSession, user_id: UUID, amount: int) -> QuotaCha
         remaining -= give_back
         if package.package_type == SIGNUP_BONUS_PACKAGE_TYPE:
             breakdown.signup_bonus_used += give_back
+        elif package.package_type == INVITE_BONUS_PACKAGE_TYPE:
+            breakdown.invite_bonus_used += give_back
         else:
             breakdown.paid_package_used += give_back
         if remaining <= 0:

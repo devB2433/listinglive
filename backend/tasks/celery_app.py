@@ -20,6 +20,13 @@ celery_app.conf.update(
     enable_utc=True,
     task_track_started=True,
     worker_prefetch_multiplier=1,
+    task_routes={
+        "video.process_short_video_task": {"queue": "video-standard"},
+        "video.process_long_video_task": {"queue": "video-standard"},
+        "video.submit_flex_short_video_task": {"queue": "video-flex"},
+        "video.poll_flex_tasks": {"queue": "video-flex"},
+        "video.finalize_flex_short_video_task": {"queue": "video-flex"},
+    },
 )
 
 # 定时任务：定期检查异常卡住的任务
@@ -27,6 +34,10 @@ celery_app.conf.beat_schedule = {
     "reconcile-stale-video-tasks": {
         "task": "video.reconcile_stale_video_tasks",
         "schedule": 300.0,  # 每 5 分钟检查一次
+    },
+    "poll-flex-video-tasks": {
+        "task": "video.poll_flex_tasks",
+        "schedule": 30.0,
     },
     "cleanup-expired-video-files": {
         "task": "video.cleanup_expired_video_files",

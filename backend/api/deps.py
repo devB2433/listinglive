@@ -36,4 +36,10 @@ async def get_current_user(
     return user
 
 
-__all__ = ["get_db", "get_redis", "get_current_user"]
+async def require_root_user(user: User = Depends(get_current_user)) -> User:
+    if user.username != "root":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail={"code": "common.forbidden"})
+    return user
+
+
+__all__ = ["get_db", "get_redis", "get_current_user", "require_root_user"]

@@ -1,0 +1,50 @@
+# 复制为 config/ai_provider.toml 后修改。
+# 当前只维护一套正式 provider / model / key，便于运维直接改这个文件。
+# 正常情况下只需要改:
+# 1. provider
+# 2. api_key
+# 3. model_id
+# 其余字段没有特殊诉求时保持默认。
+
+[video]
+# 可选: "seedance" / "local"
+# - seedance: 真实远端视频生成
+# - local: 本地调试用，不依赖远端 key
+provider = "seedance"
+
+# Seedance / Ark 接入地址
+# 一般保持默认，不需要频繁改
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+
+# 唯一正式 key
+api_key = "replace-with-your-api-key"
+
+# 当前正式模型 ID
+model_id = "replace-with-your-model-id"
+
+# 请求行为
+# transport:
+# - rest: 当前默认推荐
+# - sdk: 预留给 SDK 调用链路
+transport = "rest"
+
+# request_style:
+# - prompt_flags: 当前默认推荐，贴近官方示例
+# - structured: 预留结构化请求风格
+request_style = "prompt_flags"
+
+# 是否固定镜头
+camera_fixed = false
+
+# 是否请求 provider 生成带水印结果
+watermark = false
+
+# 超时
+# 调用远端创建/查询接口的超时
+timeout_seconds = 60
+
+# 下载生成视频的超时
+download_timeout_seconds = 300
+
+# 兜底模型名，仅在 provider 需要默认模型名时使用
+default_model = "doubao-seedance-1-0-pro-fast-251015"

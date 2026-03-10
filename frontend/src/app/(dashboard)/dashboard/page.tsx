@@ -13,6 +13,11 @@ export default function DashboardPage() {
   const { locale, translate } = useLocale();
   const [tasks, setTasks] = useState<VideoTask[]>([]);
   const [tasksLoading, setTasksLoading] = useState(true);
+  const isFreeUser = !quota.subscription_plan_type;
+  const currentPlanLabel = isFreeUser ? translate("dashboard.billing.freeUserLabel") : getAccessTierLabel(translate, quota.access_tier);
+  const currentPlanDetail = isFreeUser
+    ? translate("dashboard.overview.freeUserPlanDetail")
+    : getShortDurationSummary(translate, quota);
   const capabilitySummary = useMemo(() => {
     if (quota.access_tier === "signup_bonus") return translate("dashboard.quotaSummary.signup");
     if (isAdvancedAccess(quota)) return translate("dashboard.quotaSummary.advanced");
@@ -78,8 +83,8 @@ export default function DashboardPage() {
         />
         <SummaryCard
           title={translate("dashboard.overview.currentPlan")}
-          value={getAccessTierLabel(translate, quota.access_tier)}
-          detail={getShortDurationSummary(translate, quota)}
+          value={currentPlanLabel}
+          detail={currentPlanDetail}
         />
         <SummaryCard
           title={translate("dashboard.overview.subscriptionRemaining")}
@@ -95,6 +100,11 @@ export default function DashboardPage() {
           title={translate("dashboard.overview.signupBonusRemaining")}
           value={String(quota.signup_bonus_remaining)}
           detail={translate("dashboard.overview.signupBonusDetail")}
+        />
+        <SummaryCard
+          title={translate("dashboard.overview.inviteBonusRemaining")}
+          value={String(quota.invite_bonus_remaining)}
+          detail={translate("dashboard.overview.inviteBonusDetail")}
         />
       </section>
 
@@ -240,7 +250,7 @@ function buildTaskHeatmap(tasks: VideoTask[], locale: string) {
 
   const rangeCounts = new Map<string, number>();
   for (const [k, v] of Array.from(countsByDay)) {
-    const d = new Date(`${k}T00:00:00`);
+    const d = parseDateKey(k);
     if (d >= start && d <= end) rangeCounts.set(k, v);
   }
   const maxCount = Math.max(...Array.from(rangeCounts.values()), 0);
@@ -258,7 +268,7 @@ function buildTaskHeatmap(tasks: VideoTask[], locale: string) {
     const days: HeatmapDay[] = [];
     const cursor = new Date(monthStart);
     while (cursor <= monthEnd) {
-      const dateKey = cursor.toISOString().slice(0, 10);
+      const dateKey = formatDateKey(cursor);
       const count = rangeCounts.get(dateKey) ?? 0;
       days.push({
         dateKey,
@@ -283,7 +293,7 @@ function buildTaskHeatmap(tasks: VideoTask[], locale: string) {
     }
     padded.push(...days);
     const lastReal = days[days.length - 1];
-    const lastDow = lastReal ? weekStartOffset(new Date(lastReal.dateKey).getDay()) : 0;
+    const lastDow = lastReal ? weekStartOffset(parseDateKey(lastReal.dateKey).getDay()) : 0;
     for (let i = 0; i < 6 - lastDow; i += 1) {
       const d = new Date(monthEnd);
       d.setDate(d.getDate() + 1 + i);
@@ -313,7 +323,7 @@ function buildTaskHeatmap(tasks: VideoTask[], locale: string) {
   const mostActiveDateKey = activeDayEntries[0]?.[0] ?? null;
   const mostActiveCount = activeDayEntries[0]?.[1] ?? 0;
   const mostActiveDayLabel = mostActiveDateKey
-    ? new Intl.DateTimeFormat(locale, { dateStyle: "medium" }).format(new Date(`${mostActiveDateKey}T00:00:00`))
+    ? new Intl.DateTimeFormat(locale, { dateStyle: "medium" }).format(parseDateKey(mostActiveDateKey))
     : "-";
 
   const rangeTasksTotal = Array.from(rangeCounts.values()).reduce((a, b) => a + b, 0);
@@ -343,17 +353,17 @@ function toDateKey(value: string) {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return null;
   parsed.setHours(0, 0, 0, 0);
-  return parsed.toISOString().slice(0, 10);
+  return formatDateKey(parsed);
 }
 
 function getCurrentStreakInRange(countsByDay: Map<string, number>, rangeStart: Date, rangeEnd: Date) {
   let streak = 0;
   const cursor = new Date(rangeEnd);
   cursor.setHours(0, 0, 0, 0);
-  const startKey = rangeStart.toISOString().slice(0, 10);
+  const startKey = formatDateKey(rangeStart);
 
   while (true) {
-    const dateKey = cursor.toISOString().slice(0, 10);
+    const dateKey = formatDateKey(cursor);
     if (dateKey < startKey) break;
     if ((countsByDay.get(dateKey) ?? 0) <= 0) break;
     streak += 1;
@@ -375,5 +385,17 @@ function getLongestStreak(days: HeatmapDay[]) {
     }
   }
   return longest;
+}
+
+function formatDateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function parseDateKey(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, (month || 1) - 1, day || 1);
 }
 

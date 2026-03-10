@@ -1,10 +1,16 @@
-import { getSceneTemplates, getUserLogos, type SceneTemplate, type UserLogo } from "@/lib/api";
+import {
+  getSceneTemplates,
+  getUserLogos,
+  type SceneTemplate,
+  type SceneTemplatePropertyType,
+  type UserLogo,
+} from "@/lib/api";
 
 type SceneTemplateCategory = "short" | "long_unified";
 
 type TokenCacheEntry = {
-  templates: Partial<Record<SceneTemplateCategory, SceneTemplate[]>>;
-  templatePromises: Partial<Record<SceneTemplateCategory, Promise<SceneTemplate[]>>>;
+  templates: Record<string, SceneTemplate[] | undefined>;
+  templatePromises: Record<string, Promise<SceneTemplate[]> | undefined>;
   logos?: UserLogo[];
   logosPromise?: Promise<UserLogo[]>;
 };
@@ -26,25 +32,26 @@ function getEntry(accessToken: string): TokenCacheEntry {
 export async function getCachedSceneTemplates(
   accessToken: string,
   category: SceneTemplateCategory,
-  options?: { force?: boolean },
+  options?: { force?: boolean; propertyType?: SceneTemplatePropertyType | null },
 ): Promise<SceneTemplate[]> {
   const entry = getEntry(accessToken);
-  if (!options?.force && entry.templates[category]) {
-    return entry.templates[category] ?? [];
+  const cacheKey = `${category}:${options?.propertyType ?? "all"}`;
+  if (!options?.force && entry.templates[cacheKey]) {
+    return entry.templates[cacheKey] ?? [];
   }
-  if (!options?.force && entry.templatePromises[category]) {
-    return entry.templatePromises[category] as Promise<SceneTemplate[]>;
+  if (!options?.force && entry.templatePromises[cacheKey]) {
+    return entry.templatePromises[cacheKey] as Promise<SceneTemplate[]>;
   }
 
-  const promise = getSceneTemplates(accessToken, { category })
+  const promise = getSceneTemplates(accessToken, { category, propertyType: options?.propertyType ?? null })
     .then((templates) => {
-      entry.templates[category] = templates;
+      entry.templates[cacheKey] = templates;
       return templates;
     })
     .finally(() => {
-      delete entry.templatePromises[category];
+      delete entry.templatePromises[cacheKey];
     });
-  entry.templatePromises[category] = promise;
+  entry.templatePromises[cacheKey] = promise;
   return promise;
 }
 
@@ -90,8 +97,8 @@ export function invalidateVideoConfigCache(accessToken?: string) {
 
 export async function warmVideoConfigCache(accessToken: string): Promise<void> {
   await Promise.allSettled([
-    getCachedSceneTemplates(accessToken, "short"),
-    getCachedSceneTemplates(accessToken, "long_unified"),
+    getCachedSceneTemplates(accessToken, "short", { propertyType: "standard_home" }),
+    getCachedSceneTemplates(accessToken, "long_unified", { propertyType: "standard_home" }),
     getCachedUserLogos(accessToken),
   ]);
 }

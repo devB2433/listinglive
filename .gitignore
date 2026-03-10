@@ -1,4 +1,5 @@
 .env
+config/ai_provider.toml
 .venv/
 venv/
 __pycache__/

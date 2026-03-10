@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 
 import { useLocale } from "@/components/providers/locale-provider";
@@ -10,6 +10,7 @@ import { setStoredTokens } from "@/lib/session";
 
 export default function LoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { translate } = useLocale();
   const [usernameOrEmail, setUsernameOrEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -23,7 +24,8 @@ export default function LoginPage() {
     try {
       const data = await login(usernameOrEmail, password);
       setStoredTokens(data);
-      router.replace("/dashboard");
+      const next = searchParams.get("next");
+      router.replace(next && next.startsWith("/") ? next : "/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : translate("auth.login.failed"));
     } finally {
@@ -60,6 +62,11 @@ export default function LoginPage() {
             />
           </div>
           {error && <p className="text-sm text-red-600">{error}</p>}
+          <div className="text-right">
+            <Link href="/reset-password" className="text-sm text-blue-600 hover:underline">
+              {translate("auth.login.forgotPassword")}
+            </Link>
+          </div>
           <button
             type="submit"
             disabled={loading}

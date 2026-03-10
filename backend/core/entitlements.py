@@ -85,6 +85,7 @@ class AccessContext:
     package_remaining: int
     paid_package_remaining: int
     signup_bonus_remaining: int
+    invite_bonus_remaining: int
     total_available: int
     capabilities: tuple[str, ...]
     limits: CapabilityLimits

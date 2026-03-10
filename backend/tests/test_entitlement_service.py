@@ -13,6 +13,7 @@ class EntitlementServiceTests(unittest.TestCase):
                 "package_remaining": 5,
                 "paid_package_remaining": 0,
                 "signup_bonus_remaining": 5,
+                "invite_bonus_remaining": 0,
                 "total_available": 5,
             }
         )
@@ -33,6 +34,7 @@ class EntitlementServiceTests(unittest.TestCase):
                 "package_remaining": 0,
                 "paid_package_remaining": 0,
                 "signup_bonus_remaining": 0,
+                "invite_bonus_remaining": 0,
                 "total_available": 20,
             }
         )
@@ -53,6 +55,7 @@ class EntitlementServiceTests(unittest.TestCase):
                 "package_remaining": 10,
                 "paid_package_remaining": 10,
                 "signup_bonus_remaining": 0,
+                "invite_bonus_remaining": 0,
                 "total_available": 60,
             }
         )
@@ -74,6 +77,7 @@ class EntitlementServiceTests(unittest.TestCase):
                 "package_remaining": 0,
                 "paid_package_remaining": 0,
                 "signup_bonus_remaining": 0,
+                "invite_bonus_remaining": 0,
                 "total_available": 0,
             }
         )
@@ -90,6 +94,7 @@ class EntitlementServiceTests(unittest.TestCase):
                 "package_remaining": 13,
                 "paid_package_remaining": 10,
                 "signup_bonus_remaining": 3,
+                "invite_bonus_remaining": 0,
                 "total_available": 16,
             }
         )
@@ -98,6 +103,23 @@ class EntitlementServiceTests(unittest.TestCase):
         self.assertEqual(context.paid_package_remaining, 10)
         self.assertFalse(has_capability(context, "merge_per_image_template"))
         self.assertFalse(context.limits.short_duration_editable)
+
+    def test_invite_bonus_keeps_trial_access_available(self) -> None:
+        context = build_access_context_from_snapshot(
+            {
+                "subscription": None,
+                "subscription_remaining": 0,
+                "package_remaining": 15,
+                "paid_package_remaining": 0,
+                "signup_bonus_remaining": 0,
+                "invite_bonus_remaining": 15,
+                "total_available": 15,
+            }
+        )
+
+        self.assertEqual(context.access_tier, "signup_bonus")
+        self.assertEqual(context.invite_bonus_remaining, 15)
+        self.assertTrue(has_capability(context, "short_video_create"))
 
 
 if __name__ == "__main__":

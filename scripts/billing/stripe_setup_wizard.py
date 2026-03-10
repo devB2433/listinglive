@@ -197,8 +197,8 @@ def step_create_products(env: dict[str, str]) -> None:
     print("  - ListingLive Ultimate (plan_type=ultimate)\n")
     print("【配额包】3 个 Product，每个带 1 个一次性 Price：")
     print("  - ListingLive Credits 10 (package_type=pack_10)")
-    print("  - ListingLive Credits 30 (package_type=pack_30)")
-    print("  - ListingLive Credits 50 (package_type=pack_50)\n")
+    print("  - ListingLive Credits 50 (package_type=pack_50)")
+    print("  - ListingLive Credits 150 (package_type=pack_150)\n")
     print("每个 Product 创建后，在 Pricing 区域复制 Price ID (price_xxx)\n")
 
     open_url(STRIPE_DASHBOARD_URLS["products"], "Stripe Products 页面")
@@ -247,7 +247,7 @@ def step_price_ids() -> None:
         if val:
             config.setdefault("subscriptions", {})[plan_type] = val
 
-    for pack_type in ["pack_10", "pack_30", "pack_50"]:
+    for pack_type in ["pack_10", "pack_50", "pack_150"]:
         current = config.get("quota_packages", {}).get(pack_type, "")
         if "replace" in str(current).lower():
             current = ""

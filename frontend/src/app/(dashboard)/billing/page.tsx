@@ -208,9 +208,10 @@ export default function BillingPage() {
               <p className="mt-1 text-sm text-gray-600">{translate("dashboard.billing.freeUserDetail")}</p>
             )}
             {quota.access_tier === "signup_bonus" && (
-              <p className="mt-1 text-sm text-gray-600">
-                {translate("dashboard.billing.signupBonusDescription", { count: quota.signup_bonus_remaining })}
-              </p>
+              <div className="mt-1 space-y-1 text-sm text-gray-600">
+                <p>{translate("dashboard.billing.signupBonusDescription", { count: quota.signup_bonus_remaining })}</p>
+                <p>{translate("dashboard.billing.inviteBonusDescription", { count: quota.invite_bonus_remaining })}</p>
+              </div>
             )}
             {hasSubscription && (
               <>
@@ -231,19 +232,19 @@ export default function BillingPage() {
             {hasSubscription && (() => {
               const higherPlans = subscriptionPlans
                 .filter((p) => (PLAN_TIER_ORDER[p.plan_type] ?? 0) > currentTier)
-                .sort((a, b) => (PLAN_TIER_ORDER[b.plan_type] ?? 0) - (PLAN_TIER_ORDER[a.plan_type] ?? 0));
-              const topPlan = higherPlans[0];
-              return topPlan ? (
+                .sort((a, b) => (PLAN_TIER_ORDER[a.plan_type] ?? 0) - (PLAN_TIER_ORDER[b.plan_type] ?? 0));
+              const nextPlan = higherPlans[0];
+              return nextPlan ? (
                 <button
                   type="button"
-                  onClick={() => void handleUpgrade(topPlan.id)}
+                  onClick={() => void handleUpgrade(nextPlan.id)}
                   disabled={pendingAction !== null}
                   className="rounded-md border border-blue-600 bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
                 >
-                  {pendingAction === `upgrade:${topPlan.id}`
+                  {pendingAction === `upgrade:${nextPlan.id}`
                     ? translate("dashboard.billing.redirectUpgradePayment")
                     : translate("dashboard.billing.upgradeTo", {
-                        plan: getPlanDisplayName(translate, topPlan.plan_type, topPlan.name),
+                        plan: getPlanDisplayName(translate, nextPlan.plan_type, nextPlan.name),
                       })}
                 </button>
               ) : null;
@@ -419,6 +420,9 @@ export default function BillingPage() {
             <span className="text-gray-600">
               {translate("dashboard.billing.signupBonusTitle")} {quota.signup_bonus_remaining}
             </span>
+            <span className="text-gray-600">
+              {translate("dashboard.billing.inviteBonusTitle")} {quota.invite_bonus_remaining}
+            </span>
           </div>
         </div>
       </section>
@@ -548,8 +552,8 @@ function getPackageDisplayName(
   fallback: string,
 ) {
   if (packageType === "pack_10") return translate("dashboard.billing.packageNamePack10");
-  if (packageType === "pack_30") return translate("dashboard.billing.packageNamePack30");
   if (packageType === "pack_50") return translate("dashboard.billing.packageNamePack50");
+  if (packageType === "pack_150") return translate("dashboard.billing.packageNamePack150");
   return fallback;
 }
 

@@ -44,12 +44,11 @@ class Settings(BaseSettings):
     # 存储（短期本地）
     STORAGE_TYPE: str = "local"
     STORAGE_LOCAL_ROOT: str = "./data/storage"
+    AI_PROVIDER_CONFIG_PATH: str = "config/ai_provider.toml"
     SCENE_TEMPLATE_CONFIG_PATH: str = "config/scene_templates.json"
     TRANSITION_EFFECT_CONFIG_PATH: str = "config/transition_effects.json"
 
-    # 视频生成
-    VIDEO_PROVIDER: str = "seedance"
-    VIDEO_DEFAULT_MODEL: str = "doubao-seedance-1-0-pro-fast-251015"
+    # 视频任务运行时
     VIDEO_POLL_INTERVAL_SECONDS: int = 5
     VIDEO_MAX_POLL_SECONDS: int = 300
     VIDEO_FPS: int = 24
@@ -63,6 +62,14 @@ class Settings(BaseSettings):
     VIDEO_PROVIDER_CONCURRENCY_LIMIT: int = 8
     VIDEO_PROVIDER_CONCURRENCY_WAIT_SECONDS: int = 60
     VIDEO_PROVIDER_QUEUE_HEARTBEAT_SECONDS: int = 15
+    FLEX_POLL_INTERVAL_SECONDS: int = 60
+    FLEX_POLL_BATCH_SIZE: int = 20
+    FLEX_HARD_TIMEOUT_SECONDS: int = 7200
+    FLEX_SUBMIT_STALE_SECONDS: int = 300
+
+    # 视频 provider 旧环境变量，当前仅作为 ai_provider.toml 缺失时的兼容回退
+    VIDEO_PROVIDER: str = "seedance"
+    VIDEO_DEFAULT_MODEL: str = "doubao-seedance-1-0-pro-fast-251015"
     ARK_PROFILE: str = "test"
     ARK_API_KEY: str | None = None
     ARK_BASE_URL: str = "https://ark.cn-beijing.volces.com/api/v3"
@@ -108,6 +115,11 @@ class Settings(BaseSettings):
     @property
     def SCENE_TEMPLATE_CONFIG_FILE(self) -> Path:
         path = Path(self.SCENE_TEMPLATE_CONFIG_PATH)
+        return path if path.is_absolute() else _PROJECT_ROOT / path
+
+    @property
+    def AI_PROVIDER_CONFIG_FILE(self) -> Path:
+        path = Path(self.AI_PROVIDER_CONFIG_PATH)
         return path if path.is_absolute() else _PROJECT_ROOT / path
 
     @property

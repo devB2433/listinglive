@@ -4,7 +4,7 @@ Stripe 的完整配置与集成说明已整合到：
 
 **[doc/stripe_integration.md](stripe_integration.md)**
 
-该文档包含：快速开始、正式项目集成（当前仅 99 元订阅 + 50 元配额包）、Price ID 映射与同步、Webhook、payments_test Demo 配置、常见问题与生产部署检查。
+该文档包含：快速开始、正式项目集成（当前为 3 档订阅 + 3 档配额包）、Price ID 映射与同步、Webhook、payments_test Demo 配置、常见问题与生产部署检查。
 
 快速入口：
 

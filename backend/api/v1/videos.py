@@ -42,7 +42,11 @@ from backend.services.video_service import (
     to_video_task_out,
     upload_logo_asset,
 )
-from backend.tasks.video import process_long_video_task_job, process_short_video_task_job
+from backend.tasks.video import (
+    process_long_video_task_job,
+    process_short_video_task_job,
+    submit_flex_short_video_task_job,
+)
 
 router = APIRouter()
 
@@ -50,9 +54,10 @@ router = APIRouter()
 @router.get("/scene-templates", response_model=list[SceneTemplateOut])
 async def get_scene_templates(
     category: str = Query(default=SCENE_TEMPLATE_CATEGORY_SHORT),
+    property_type: str | None = Query(default=None, pattern=r"^(standard_home|luxury_home|apartment_rental)$"),
     db: AsyncSession = Depends(get_db),
 ) -> list[SceneTemplateOut]:
-    return await list_scene_templates(db, category=category)
+    return await list_scene_templates(db, category=category, property_type=property_type)
 
 
 @router.get("/logos", response_model=list[UserLogoOut])
@@ -139,10 +144,12 @@ async def create_short_task(
             aspect_ratio=body.aspect_ratio,
             duration_seconds=body.duration_seconds,
             logo_key=body.logo_key,
+            service_tier=body.service_tier,
         )
         await db.commit()
         await db.refresh(task)
-        await enqueue_video_task_or_fail(db, task=task, enqueue_fn=process_short_video_task_job.delay)
+        enqueue_fn = submit_flex_short_video_task_job.delay if task.service_tier == "flex" else process_short_video_task_job.delay
+        await enqueue_video_task_or_fail(db, task=task, enqueue_fn=enqueue_fn)
         return to_video_task_out(task)
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
@@ -169,6 +176,7 @@ async def create_long_task(
             duration_seconds=body.duration_seconds,
             logo_key=body.logo_key,
             segments=body.segments,
+            service_tier=body.service_tier,
         )
         await db.commit()
         await db.refresh(task)

@@ -1,6 +1,7 @@
 # models
 
 from backend.models.logo_asset import LogoAsset
+from backend.models.invite_code import InviteCode
 from backend.models.long_video_segment import LongVideoSegment
 from backend.models.quota import QuotaPackage, QuotaPackagePlan
 from backend.models.scene_template import SceneTemplate
@@ -11,6 +12,7 @@ from backend.models.video_task import VideoTask
 
 __all__ = [
     "User",
+    "InviteCode",
     "LogoAsset",
     "LongVideoSegment",
     "SceneTemplate",

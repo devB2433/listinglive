@@ -13,6 +13,7 @@ from backend.core.config import settings
 from backend.schemas.auth import (
     LoginRequest,
     RegisterRequest,
+    ResetPasswordRequest,
     SendCodeRequest,
     TokenResponse,
     RefreshRequest,
@@ -21,6 +22,7 @@ from backend.services.auth_service import (
     send_verify_code,
     verify_code,
     register as do_register,
+    reset_password as do_reset_password,
     authenticate_user,
     create_access_token,
     create_refresh_token,
@@ -54,7 +56,7 @@ async def register(
     redis: Redis = Depends(get_redis),
 ) -> TokenResponse:
     try:
-        user = await do_register(db, redis, body.username, body.password, body.email, body.code)
+        user = await do_register(db, redis, body.username, body.password, body.email, body.code, body.invite_code)
         return TokenResponse(
             access_token=create_access_token(user.id),
             refresh_token=create_refresh_token(user.id),
@@ -86,6 +88,24 @@ async def login(
         access_token=create_access_token(user.id),
         refresh_token=create_refresh_token(user.id),
     )
+
+
+@router.post("/reset-password")
+async def reset_password(
+    body: ResetPasswordRequest,
+    db: AsyncSession = Depends(get_db),
+    redis: Redis = Depends(get_redis),
+) -> dict:
+    try:
+        await do_reset_password(db, redis, body.email, body.code, body.new_password)
+        return {"message": "ok"}
+    except AppError as e:
+        raise HTTPException(status_code=e.status_code, detail={"code": e.code})
+    except Exception as e:
+        logger.exception("reset_password error")
+        if settings.DEBUG:
+            raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail={"code": "common.serverError"})
 
 
 @router.post("/refresh", response_model=TokenResponse)

@@ -38,7 +38,10 @@ python scripts/billing/stripe_setup_wizard.py
 - Webhook：`POST /api/v1/billing/webhooks/stripe`
 - 本地订阅与配额同步：`checkout.session.completed`、`customer.subscription.*`、`invoice.*`
 
-当前套餐已收敛为与 demo 一致：**仅一个订阅（99 元/月）和一个配额包（50 点/50 元）**，由迁移 014 与 `config/stripe_price_ids.*` 控制。
+当前套餐目录为：
+
+- 订阅：`Basic (CAD 9.9 / 20 credits)`、`Pro (CAD 19.9 / 50 credits)`、`Ultimate (CAD 49.9 / 150 credits)`
+- 配额包：`pack_10 (CAD 5 / 10 credits)`、`pack_50 (CAD 20 / 50 credits)`、`pack_150 (CAD 50 / 150 credits)`
 
 ---
 
@@ -89,20 +92,24 @@ STRIPE_BILLING_PORTAL_RETURN_URL=http://127.0.0.1:3001/billing
 
 ### 3.2 在 Stripe 中创建 Product 与 Price
 
-当前仅使用 **一个订阅套餐（basic）** 和 **一个配额包（pack_50）**。
+当前使用 **三个订阅套餐** 和 **三个配额包**。
 
-**订阅套餐（99 元/月）**
+**订阅套餐**
 
 1. [Stripe Dashboard → Products](https://dashboard.stripe.com/test/products) → **Add product**。
-2. Name：`ListingLive 订阅套餐`（或与 demo 一致）。
-3. Pricing：**Standard**，Price 填 99，Billing period 选 **Monthly**，Currency 选 **CAD**。
-4. 创建后进入该 Product，在 **Pricing** 中复制 Price ID（`price_xxx`）。
+2. 分别创建：
+   - `ListingLive Basic`，`CAD 9.9 / Monthly`
+   - `ListingLive Pro`，`CAD 19.9 / Monthly`
+   - `ListingLive Ultimate`，`CAD 49.9 / Monthly`
+3. 创建后进入每个 Product，在 **Pricing** 中复制 Price ID（`price_xxx`）。
 
-**配额包（50 点/50 元）**
+**配额包**
 
-1. 再 **Add product**，Name：`ListingLive 配额包`。
-2. Pricing：**One time**，50 元，CAD。
-3. 复制该 Product 下 Price 的 `price_xxx`。
+1. 再分别创建：
+   - `ListingLive Credits 10`，`CAD 5 / One time`
+   - `ListingLive Credits 50`，`CAD 20 / One time`
+   - `ListingLive Credits 150`，`CAD 50 / One time`
+2. 复制每个 Product 下 Price 的 `price_xxx`。
 
 **复用 payments_test demo 的 Price**
 
@@ -120,22 +127,28 @@ STRIPE_BILLING_PORTAL_RETURN_URL=http://127.0.0.1:3001/billing
    copy config\stripe_price_ids.example.json config\stripe_price_ids.local.json
    ```
 
-2. 在 `stripe_price_ids.local.json` 中填写（当前为 Basic、Ultimate、pack_50 三个）。测试环境示例：
+2. 在 `stripe_price_ids.local.json` 中填写完整映射。示例：
 
    | 套餐/包 | Price ID | Payment Link（测试） |
    |--------|----------|----------------------|
-   | Basic | `price_1T8TWRE7j4zc6aIDCKYmyxG6` | https://buy.stripe.com/test_8x214n6AzaM7ai2fV3b7y00 |
-   | Ultimate | `price_1T8TX9E7j4zc6aIDimtalpOK` | https://buy.stripe.com/test_dRm00jbUT5rN89U8sBb7y02 |
-   | pack_50 | `price_1T8TXwE7j4zc6aIDSKZwoB7q` | https://buy.stripe.com/test_dRm3cv1gf4nJ1Lw8sBb7y01 |
+   | Basic | `price_xxx` | 在 Stripe Dashboard 中复制 |
+   | Pro | `price_xxx` | 在 Stripe Dashboard 中复制 |
+   | Ultimate | `price_xxx` | 在 Stripe Dashboard 中复制 |
+   | pack_10 | `price_xxx` | 在 Stripe Dashboard 中复制 |
+   | pack_50 | `price_xxx` | 在 Stripe Dashboard 中复制 |
+   | pack_150 | `price_xxx` | 在 Stripe Dashboard 中复制 |
 
    ```json
    {
      "subscriptions": {
-       "basic": "price_1T8TWRE7j4zc6aIDCKYmyxG6",
-       "ultimate": "price_1T8TX9E7j4zc6aIDimtalpOK"
+       "basic": "replace_with_basic_price_id",
+       "pro": "replace_with_pro_price_id",
+       "ultimate": "replace_with_ultimate_price_id"
      },
      "quota_packages": {
-       "pack_50": "price_1T8TXwE7j4zc6aIDSKZwoB7q"
+       "pack_10": "replace_with_pack_10_price_id",
+       "pack_50": "replace_with_pack_50_price_id",
+       "pack_150": "replace_with_pack_150_price_id"
      }
    }
    ```
@@ -153,13 +166,13 @@ STRIPE_BILLING_PORTAL_RETURN_URL=http://127.0.0.1:3001/billing
 1. Stripe Dashboard → **Settings** → **Billing** → **Customer portal**。
 2. 至少开启：更新付款方式、查看账单、取消订阅。
 3. 取消策略建议：**Cancel at period end**。
-4. 若当前仅一个订阅 Price，可暂不开放「切换套餐」。
+4. 建议开启订阅切换，便于 `Basic -> Pro -> Ultimate` 升级。
 5. **Return URL**：本地 `http://127.0.0.1:3001/billing`，生产改为实际套餐页地址。
 
 ### 3.5 联调顺序建议
 
 1. 配置 `.env` 中的 Stripe 密钥与 URL。
-2. 在 Stripe 创建上述 2 个 Product 与 Price。
+2. 在 Stripe 创建上述 6 个 Product 与 Price。
 3. 填写 `config/stripe_price_ids.local.json` 并执行同步脚本。
 4. 启动后端、前端、数据库。
 5. 启动 `stripe listen --forward-to http://127.0.0.1:8003/api/v1/billing/webhooks/stripe`，将输出的 `whsec_xxx` 写入 `STRIPE_WEBHOOK_SECRET`。

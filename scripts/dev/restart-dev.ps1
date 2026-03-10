@@ -116,6 +116,10 @@ $null = Wait-PortFree -Port $FrontendPort
 
 # === Phase 3: Ensure config files ===
 if (-not (Test-Path '.env')) { Copy-Item '.env.example' '.env' }
+if (-not (Test-Path 'config/ai_provider.toml') -and (Test-Path 'config/ai_provider.toml.example')) {
+  Copy-Item 'config/ai_provider.toml.example' 'config/ai_provider.toml'
+  Write-Host 'Created config/ai_provider.toml from example. Please fill in video.api_key and video.model_id before testing remote generation.'
+}
 if (-not (Test-Path 'frontend/.env.local')) {
   'NEXT_PUBLIC_API_URL=http://localhost:8003' | Set-Content 'frontend/.env.local'
 }
@@ -149,7 +153,7 @@ for ($i = 1; $i -le $WorkerCount; $i++) {
   $wOut = if ($i -eq 1) { Join-Path $runtimeDir 'worker.out.log' } else { Join-Path $runtimeDir "worker-$i.out.log" }
   $wErr = if ($i -eq 1) { Join-Path $runtimeDir 'worker.err.log' } else { Join-Path $runtimeDir "worker-$i.err.log" }
   $wName = if ($i -eq 1) { 'worker' } else { "worker-$i" }
-  $wProc = Start-Process python -ArgumentList '-m','celery','-A','backend.tasks.celery_app','worker','-l','info','-P','solo','-n',"listinglive-worker-$i@%h" -WorkingDirectory $root -RedirectStandardOutput $wOut -RedirectStandardError $wErr -PassThru
+  $wProc = Start-Process python -ArgumentList '-m','celery','-A','backend.tasks.celery_app','worker','-l','info','-P','solo','-Q','celery,video-standard,video-flex','-n',"listinglive-worker-$i@%h" -WorkingDirectory $root -RedirectStandardOutput $wOut -RedirectStandardError $wErr -PassThru
   Save-Pid $wProc $wName
 }
 

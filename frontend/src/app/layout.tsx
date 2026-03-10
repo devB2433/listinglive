@@ -5,7 +5,7 @@ import { LocaleProvider } from "@/components/providers/locale-provider";
 
 export const metadata: Metadata = {
   title: "ListingLive",
-  description: "Turn listing photos into ready-to-publish property videos with an AI workflow built for real estate teams.",
+  description: "Turn listing photos into dynamic showcase content with an AI workflow built for real estate teams.",
 };
 
 export default function RootLayout({
@@ -14,7 +14,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN" suppressHydrationWarning>
+    <html lang="en" suppressHydrationWarning>
       <body className="antialiased">
         <LocaleProvider>{children}</LocaleProvider>
       </body>

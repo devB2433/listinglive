@@ -22,6 +22,7 @@ const EMPTY_QUOTA: QuotaSnapshot = {
   package_remaining: 0,
   paid_package_remaining: 0,
   signup_bonus_remaining: 0,
+  invite_bonus_remaining: 0,
   total_available: 0,
   access_tier: "none",
   capabilities: [],

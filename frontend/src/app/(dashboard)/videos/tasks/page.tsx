@@ -15,7 +15,7 @@ import {
   type LongVideoSegmentStatus,
   type VideoTask,
 } from "@/lib/api";
-import { translateApiError, type Locale } from "@/lib/locale";
+import { t, translateApiError, type Locale } from "@/lib/locale";
 import { deletePendingVideoDraft, getPendingVideoDraft, type PendingVideoDraft } from "@/lib/pending-video-task";
 
 type UserFacingTaskStatus = "uploading" | "queued" | "creating" | "post_processing" | "completed" | "failed";
@@ -24,6 +24,7 @@ type TaskTypeFilter = "all" | "short" | "long";
 type PendingTaskView = {
   id: string;
   task_type: "short" | "long";
+  service_tier: "standard" | "flex";
   status: "uploading" | "failed";
   resolution: string;
   aspect_ratio: string;
@@ -59,7 +60,9 @@ export default function VideoTasksPage() {
   const hasRunningTask = useMemo(
     () =>
       pendingTasks.some((task) => task.status === "uploading") ||
-      tasks.some((task) => task.status === "queued" || task.status === "processing" || task.status === "merging"),
+      tasks.some((task) =>
+        ["queued", "processing", "merging", "submitting", "submitted", "provider_processing", "finalizing"].includes(task.status),
+      ),
     [pendingTasks, tasks],
   );
 
@@ -95,6 +98,7 @@ export default function VideoTasksPage() {
           aspect_ratio: draft.aspect_ratio,
           duration_seconds: draft.duration_seconds,
           logo_key: draft.logo_key ?? null,
+          service_tier: draft.service_tier,
         });
       } else {
         const uploads = await Promise.all(draft.segments.map((segment) => uploadVideoAsset(accessToken, segment.file, "image")));
@@ -114,6 +118,7 @@ export default function VideoTasksPage() {
           aspect_ratio: draft.aspect_ratio,
           duration_seconds: draft.edit_mode === "custom" ? firstSegment?.duration_seconds || draft.duration_seconds : draft.duration_seconds,
           logo_key: draft.logo_key ?? null,
+          service_tier: draft.service_tier,
           segments:
             draft.edit_mode === "custom"
               ? orderedSegments.map((segment, index) => ({
@@ -309,7 +314,10 @@ function PendingTaskCard({
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div className="min-w-0">
           <p className="font-medium text-gray-900">{renderPendingTaskStatus(translate, task.status)}</p>
-          <p className="mt-1 text-sm text-gray-600">{translate("dashboard.tasks.taskType", { value: renderTaskType(translate, task.task_type) })}</p>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-gray-600">
+            <p>{translate("dashboard.tasks.taskType", { value: renderTaskType(translate, task.task_type) })}</p>
+            {renderServiceTierBadge(translate, task.service_tier)}
+          </div>
           <p className="mt-1 break-all text-xs text-gray-500">{translate("dashboard.tasks.taskId", { id: task.id })}</p>
         </div>
       </div>
@@ -317,6 +325,7 @@ function PendingTaskCard({
         <p>{translate("common.resolution")}：{task.resolution}</p>
         <p>{translate("common.aspectRatio")}：{task.aspect_ratio}</p>
         <p>{translate("common.duration")}：{translate("common.seconds", { value: task.duration_seconds })}</p>
+        <p>{translate("dashboard.tasks.serviceTierLabel", { value: renderServiceTier(translate, task.service_tier) })}</p>
         <p>{translate("dashboard.tasks.creditUsage", { charged: task.charged_quota_consumed, planned: task.planned_quota_consumed })}</p>
         {task.segment_count ? <p>{translate("dashboard.tasks.segmentCount", { value: task.segment_count })}</p> : null}
         <p>{translate("common.createdAt")}：{formatDate(task.created_at)}</p>
@@ -355,7 +364,10 @@ function TaskCard({
     <div className="rounded-2xl border bg-white p-5">
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div className="min-w-0">
-          <p className="font-medium text-gray-900">{renderStatus(translate, task.status, task.task_type, hasFailedLongSegments)}</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="font-medium text-gray-900">{renderStatus(translate, task.status, task.task_type, hasFailedLongSegments)}</p>
+            {renderServiceTierBadge(translate, task.service_tier)}
+          </div>
           <p className="mt-1 text-sm text-gray-600">{translate("dashboard.tasks.taskType", { value: renderTaskType(translate, task.task_type) })}</p>
           <p className="mt-1 break-all text-xs text-gray-500">{translate("dashboard.tasks.taskId", { id: task.id })}</p>
         </div>
@@ -386,6 +398,7 @@ function TaskCard({
         <p>{translate("common.resolution")}：{task.resolution}</p>
         <p>{translate("common.aspectRatio")}：{task.aspect_ratio}</p>
         <p>{translate("common.duration")}：{translate("common.seconds", { value: task.duration_seconds })}</p>
+        <p>{translate("dashboard.tasks.serviceTierLabel", { value: renderServiceTier(translate, task.service_tier) })}</p>
         <p>{translate("dashboard.tasks.creditUsage", { charged: task.charged_quota_consumed, planned: task.planned_quota_consumed })}</p>
         <p>{translate("dashboard.tasks.chargeStatusLabel", { value: renderChargeStatus(translate, task.charge_status) })}</p>
         {task.segment_count ? <p>{translate("dashboard.tasks.segmentCount", { value: task.segment_count })}</p> : null}
@@ -398,12 +411,18 @@ function TaskCard({
         {task.processing_seconds != null ? <p>{translate("dashboard.tasks.processingTime", { value: formatElapsed(task.processing_seconds, translate) })}</p> : null}
         {task.total_elapsed_seconds != null ? <p>{translate("dashboard.tasks.totalElapsed", { value: formatElapsed(task.total_elapsed_seconds, translate) })}</p> : null}
         {task.provider_name && <p>{translate("common.provider")}：{task.provider_name}</p>}
+        {task.provider_status ? <p>{translate("dashboard.tasks.providerStatusLabel", { value: renderProviderStatus(translate, task.provider_status) })}</p> : null}
         {task.error_message && (
           <p className="text-red-600">
             {translate("common.error")}：{renderTaskError(locale, task.error_message)}
           </p>
         )}
       </div>
+      {task.service_tier === "flex" && task.status !== "succeeded" && task.status !== "failed" ? (
+        <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">
+          {translate("dashboard.tasks.flexTaskHint")}
+        </div>
+      ) : null}
       {task.task_type === "long" && task.long_segments && task.long_segments.length > 0 ? (
         <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-4">
           <div className="mb-3">
@@ -440,6 +459,7 @@ function buildPendingTaskView(draft: PendingVideoDraft): PendingTaskView {
   return {
     id: draft.id,
     task_type: draft.task_type,
+    service_tier: draft.service_tier,
     status: "uploading",
     resolution: draft.resolution,
     aspect_ratio: draft.aspect_ratio,
@@ -456,8 +476,8 @@ function getUserFacingTaskStatus(task: VideoTask | PendingTaskView): UserFacingT
     const hasFailedLongSegments = task.task_type === "long" && !!task.long_segments?.some((segment) => segment.status === "failed");
     if (hasFailedLongSegments) return "failed";
     if (task.status === "queued") return "queued";
-    if (task.status === "processing") return "creating";
-    if (task.status === "merging") return task.task_type === "long" ? "post_processing" : "creating";
+    if (["processing", "submitting", "submitted", "provider_processing"].includes(task.status)) return "creating";
+    if (task.status === "merging" || task.status === "finalizing") return task.task_type === "long" ? "post_processing" : "creating";
     if (task.status === "succeeded") return "completed";
     return "failed";
   }
@@ -472,8 +492,8 @@ function renderStatus(
 ) {
   if (hasFailedLongSegments) return translate("dashboard.tasks.failed");
   if (status === "queued") return translate("dashboard.tasks.queued");
-  if (status === "processing") return translate("dashboard.tasks.creating");
-  if (status === "merging") {
+  if (["processing", "submitting", "submitted", "provider_processing"].includes(status)) return translate("dashboard.tasks.creating");
+  if (status === "merging" || status === "finalizing") {
     if (taskType === "long") return translate("dashboard.tasks.postProcessing");
     return translate("dashboard.tasks.creating");
   }
@@ -500,8 +520,28 @@ function renderTaskType(translate: (key: string) => string, taskType: string) {
   return taskType;
 }
 
+function renderServiceTier(translate: (key: string) => string, serviceTier: "standard" | "flex") {
+  return serviceTier === "flex" ? translate("dashboard.tasks.serviceTierFlex") : translate("dashboard.tasks.serviceTierStandard");
+}
+
+function renderServiceTierBadge(
+  translate: (key: string) => string,
+  serviceTier: "standard" | "flex",
+) {
+  if (serviceTier !== "flex") return null;
+  return <span className="rounded-full bg-violet-100 px-2 py-0.5 text-xs text-violet-700">{translate("dashboard.tasks.flexBadge")}</span>;
+}
+
+function renderProviderStatus(translate: (key: string) => string, status: string) {
+  if (status === "queued" || status === "submitted") return translate("dashboard.tasks.providerQueued");
+  if (status === "processing" || status === "provider_processing") return translate("dashboard.tasks.providerProcessing");
+  if (status === "succeeded") return translate("dashboard.tasks.providerSucceeded");
+  if (status === "failed") return translate("dashboard.tasks.providerFailed");
+  return status;
+}
+
 function renderTaskError(locale: Locale, errorMessage: string) {
-  return translateApiError(errorMessage, locale) ?? errorMessage;
+  return translateApiError(errorMessage, locale) ?? (errorMessage.includes(".") ? t(locale, "common.requestFailed") : errorMessage);
 }
 
 function SegmentTaskTreeNode({

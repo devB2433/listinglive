@@ -1,5 +1,5 @@
 import { getStoredLocale, translateApiError, t } from "@/lib/locale";
-import { getStoredAccessToken, getStoredRefreshToken, setStoredTokens, clearStoredTokens } from "@/lib/session";
+import { getStoredRefreshToken, setStoredTokens, clearStoredTokens } from "@/lib/session";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8003";
 const PREFIX = `${API}/api/v1`;
@@ -13,6 +13,102 @@ export type UserProfile = {
   status: string;
 };
 
+export type InviteCode = {
+  id: string;
+  code: string;
+  owner_user_id: string | null;
+  created_by_user_id: string;
+  used_by_user_id?: string | null;
+  is_active: boolean;
+  used_at?: string | null;
+  created_at: string;
+};
+
+export type AdminDailyStatPoint = {
+  date: string;
+  value: number;
+};
+
+export type AdminDashboardSummary = {
+  total_users: number;
+  new_users_today: number;
+  tasks_today: number;
+  succeeded_today: number;
+  failed_today: number;
+  processing_now: number;
+  active_subscriptions: number;
+};
+
+export type AdminMfaStatus = {
+  enabled: boolean;
+  configured: boolean;
+  confirmed_at?: string | null;
+};
+
+export type AdminMfaSetup = {
+  secret: string;
+  otpauth_url: string;
+  qr_svg: string;
+};
+
+export type AdminDashboardDailyStats = {
+  new_users: AdminDailyStatPoint[];
+  tasks_created: AdminDailyStatPoint[];
+};
+
+export type AdminUserListItem = {
+  id: string;
+  username: string;
+  email: string;
+  email_verified: boolean;
+  preferred_language: "zh-CN" | "en";
+  status: string;
+  invited_by_code?: string | null;
+  created_at: string;
+};
+
+export type AdminUserListResult = {
+  items: AdminUserListItem[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
+export type AdminTaskListItem = {
+  id: string;
+  user_id: string;
+  username: string;
+  email: string;
+  task_type: string;
+  service_tier: string;
+  status: string;
+  provider_name?: string | null;
+  provider_status?: string | null;
+  planned_quota_consumed: number;
+  charged_quota_consumed: number;
+  charge_status: string;
+  queued_at: string;
+  processing_started_at?: string | null;
+  finished_at?: string | null;
+  queue_wait_seconds?: number | null;
+  processing_seconds?: number | null;
+  total_elapsed_seconds?: number | null;
+  error_message?: string | null;
+  created_at: string;
+  resolution: string;
+  aspect_ratio: string;
+  duration_seconds: number;
+  prompt: string;
+  video_key?: string | null;
+};
+
+export type AdminTaskListResult = {
+  items: AdminTaskListItem[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
 export type QuotaSnapshot = {
   subscription_plan_type: string | null;
   subscription_status: string | null;
@@ -22,6 +118,7 @@ export type QuotaSnapshot = {
   package_remaining: number;
   paid_package_remaining: number;
   signup_bonus_remaining: number;
+  invite_bonus_remaining: number;
   total_available: number;
   access_tier: "signup_bonus" | "basic" | "pro" | "ultimate" | "none";
   capabilities: string[];
@@ -88,8 +185,11 @@ export type SceneTemplate = {
   id: string;
   template_key: string;
   name: string;
+  property_types: SceneTemplatePropertyType[];
   sort_order: number;
 };
+
+export type SceneTemplatePropertyType = "standard_home" | "luxury_home" | "apartment_rental";
 
 export type UserLogo = {
   id: string;
@@ -127,6 +227,7 @@ export type LongVideoSegmentStatus = {
 export type VideoTask = {
   id: string;
   task_type: string;
+  service_tier: "standard" | "flex";
   status: string;
   image_keys?: string[];
   resolution: string;
@@ -139,6 +240,7 @@ export type VideoTask = {
   charge_status: string;
   charged_at?: string | null;
   provider_name?: string | null;
+  provider_status?: string | null;
   video_key?: string | null;
   download_url?: string | null;
   error_message?: string | null;
@@ -167,7 +269,7 @@ async function parseError(res: Response) {
     if (detail.message) {
       throw new Error(detail.message);
     }
-    throw new Error(detail.code);
+    throw new Error(t(getStoredLocale(), "common.requestFailed"));
   }
   if (typeof detail === "string") {
     throw new Error(detail);
@@ -230,6 +332,16 @@ export async function login(usernameOrEmail: string, password: string) {
   return res.json() as Promise<{ access_token: string; refresh_token: string }>;
 }
 
+export async function adminLogin(usernameOrEmail: string, password: string, totpCode?: string) {
+  const res = await fetch(`${PREFIX}/admin/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username_or_email: usernameOrEmail, password, totp_code: totpCode || null }),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<{ access_token: string; refresh_token: string }>;
+}
+
 export async function sendCode(email: string) {
   const res = await fetch(`${PREFIX}/auth/send-code`, {
     method: "POST",
@@ -240,14 +352,24 @@ export async function sendCode(email: string) {
   return res.json() as Promise<{ message: string; debug_code?: string }>;
 }
 
-export async function register(username: string, password: string, email: string, code: string) {
+export async function register(username: string, password: string, email: string, code: string, inviteCode: string) {
   const res = await fetch(`${PREFIX}/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password, email, code }),
+    body: JSON.stringify({ username, password, email, code, invite_code: inviteCode }),
   });
   if (!res.ok) await parseError(res);
   return res.json() as Promise<{ access_token: string; refresh_token: string }>;
+}
+
+export async function resetPassword(email: string, code: string, newPassword: string) {
+  const res = await fetch(`${PREFIX}/auth/reset-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, code, new_password: newPassword }),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<{ message: string }>;
 }
 
 export async function getMe(accessToken: string) {
@@ -256,6 +378,173 @@ export async function getMe(accessToken: string) {
   });
   if (!res.ok) await parseError(res);
   return res.json() as Promise<UserProfile>;
+}
+
+export async function getMyInviteCode(accessToken: string) {
+  const res = await authFetch(`${PREFIX}/invite-codes/me`, {
+    headers: authHeaders(accessToken),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<InviteCode | null>;
+}
+
+export async function createMyInviteCode(accessToken: string) {
+  const res = await authFetch(`${PREFIX}/invite-codes/me`, {
+    method: "POST",
+    headers: authHeaders(accessToken),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<InviteCode>;
+}
+
+export async function getAdminDashboardSummary(accessToken: string) {
+  const res = await authFetch(`${PREFIX}/admin/dashboard/summary`, {
+    headers: authHeaders(accessToken),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<AdminDashboardSummary>;
+}
+
+export async function getAdminMfaStatus(accessToken: string) {
+  const res = await authFetch(`${PREFIX}/admin/security/mfa/status`, {
+    headers: authHeaders(accessToken),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<AdminMfaStatus>;
+}
+
+export async function setupAdminMfa(accessToken: string) {
+  const res = await authFetch(`${PREFIX}/admin/security/mfa/setup`, {
+    method: "POST",
+    headers: authHeaders(accessToken),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<AdminMfaSetup>;
+}
+
+export async function enableAdminMfa(accessToken: string, code: string) {
+  const res = await authFetch(`${PREFIX}/admin/security/mfa/enable`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(accessToken),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ code }),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<AdminMfaStatus>;
+}
+
+export async function disableAdminMfa(accessToken: string, code: string) {
+  const res = await authFetch(`${PREFIX}/admin/security/mfa/disable`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(accessToken),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ code }),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<AdminMfaStatus>;
+}
+
+export async function getAdminDashboardDailyStats(accessToken: string, options?: { days?: number }) {
+  const query = new URLSearchParams();
+  if (options?.days) query.set("days", String(options.days));
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  const res = await authFetch(`${PREFIX}/admin/dashboard/daily-stats${suffix}`, {
+    headers: authHeaders(accessToken),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<AdminDashboardDailyStats>;
+}
+
+export async function getAdminUsers(
+  accessToken: string,
+  options?: { query?: string; status?: string; page?: number; pageSize?: number },
+) {
+  const query = new URLSearchParams();
+  if (options?.query) query.set("query", options.query);
+  if (options?.status) query.set("status", options.status);
+  if (options?.page) query.set("page", String(options.page));
+  if (options?.pageSize) query.set("page_size", String(options.pageSize));
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  const res = await authFetch(`${PREFIX}/admin/users${suffix}`, {
+    headers: authHeaders(accessToken),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<AdminUserListResult>;
+}
+
+export async function blockAdminUser(accessToken: string, userId: string) {
+  const res = await authFetch(`${PREFIX}/admin/users/${userId}/block`, {
+    method: "POST",
+    headers: authHeaders(accessToken),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<AdminUserListItem>;
+}
+
+export async function unblockAdminUser(accessToken: string, userId: string) {
+  const res = await authFetch(`${PREFIX}/admin/users/${userId}/unblock`, {
+    method: "POST",
+    headers: authHeaders(accessToken),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<AdminUserListItem>;
+}
+
+export async function resetAdminUserPassword(accessToken: string, userId: string, newPassword: string) {
+  const res = await authFetch(`${PREFIX}/admin/users/${userId}/reset-password`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(accessToken),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ new_password: newPassword }),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<AdminUserListItem>;
+}
+
+export async function getAdminTasks(
+  accessToken: string,
+  options?: { query?: string; status?: string; taskType?: string; serviceTier?: string; page?: number; pageSize?: number },
+) {
+  const query = new URLSearchParams();
+  if (options?.query) query.set("query", options.query);
+  if (options?.status) query.set("status", options.status);
+  if (options?.taskType) query.set("task_type", options.taskType);
+  if (options?.serviceTier) query.set("service_tier", options.serviceTier);
+  if (options?.page) query.set("page", String(options.page));
+  if (options?.pageSize) query.set("page_size", String(options.pageSize));
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  const res = await authFetch(`${PREFIX}/admin/tasks${suffix}`, {
+    headers: authHeaders(accessToken),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<AdminTaskListResult>;
+}
+
+export async function getAdminInviteCodes(accessToken: string) {
+  const res = await authFetch(`${PREFIX}/admin/invite-codes`, {
+    headers: authHeaders(accessToken),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<InviteCode[]>;
+}
+
+export async function createAdminInviteCode(accessToken: string) {
+  const res = await authFetch(`${PREFIX}/admin/invite-codes`, {
+    method: "POST",
+    headers: {
+      ...authHeaders(accessToken),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ owner_user_id: null }),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<InviteCode>;
 }
 
 export async function updateMyPreferences(
@@ -393,10 +682,11 @@ export async function getQuotaPackagePlans(accessToken: string) {
 
 export async function getSceneTemplates(
   accessToken: string,
-  options?: { category?: "short" | "long_unified" },
+  options?: { category?: "short" | "long_unified"; propertyType?: SceneTemplatePropertyType | null },
 ) {
   const query = new URLSearchParams();
   if (options?.category) query.set("category", options.category);
+  if (options?.propertyType) query.set("property_type", options.propertyType);
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
   const res = await authFetch(`${PREFIX}/videos/scene-templates${suffix}`, {
     headers: authHeaders(accessToken),
@@ -471,6 +761,7 @@ export async function createShortVideoTask(
     aspect_ratio: "16:9" | "9:16" | "1:1" | "adaptive";
     duration_seconds: number;
     logo_key?: string | null;
+    service_tier?: "standard" | "flex";
   },
 ) {
   const res = await authFetch(`${PREFIX}/videos/tasks/short`, {
@@ -495,6 +786,7 @@ export async function createLongVideoTask(
     duration_seconds: number;
     logo_key?: string | null;
     segments?: LongVideoSegmentInput[] | null;
+    service_tier?: "standard" | "flex";
   },
 ) {
   const res = await authFetch(`${PREFIX}/videos/tasks/merge`, {

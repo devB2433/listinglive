@@ -1,9 +1,12 @@
 {
   "subscriptions": {
-    "basic": "price_1T8TWRE7j4zc6aIDCKYmyxG6",
-    "ultimate": "price_1T8TX9E7j4zc6aIDimtalpOK"
+    "basic": "replace_with_basic_price_id",
+    "pro": "replace_with_pro_price_id",
+    "ultimate": "replace_with_ultimate_price_id"
   },
   "quota_packages": {
-    "pack_50": "price_1T8TXwE7j4zc6aIDSKZwoB7q"
+    "pack_10": "replace_with_pack_10_price_id",
+    "pack_50": "replace_with_pack_50_price_id",
+    "pack_150": "replace_with_pack_150_price_id"
   }
 }

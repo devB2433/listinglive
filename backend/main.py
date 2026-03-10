@@ -14,6 +14,7 @@ from backend.api.v1.router import api_router
 from backend.core.redis_client import close_redis
 from backend.services.video_service import (
     cleanup_expired_video_files_on_startup,
+    recover_flex_video_tasks_on_startup,
     reconcile_stale_video_tasks_on_startup,
     sync_scene_templates_on_startup,
 )
@@ -26,6 +27,9 @@ async def lifespan(app: FastAPI):
     load_transition_effects()
     await sync_scene_templates_on_startup()
     await reconcile_stale_video_tasks_on_startup()
+    recovered_flex = await recover_flex_video_tasks_on_startup()
+    if recovered_flex > 0:
+        logger.info("Recovered %s flex video task(s) on startup.", recovered_flex)
     await cleanup_expired_video_files_on_startup()
     yield
     await close_redis()

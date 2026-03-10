@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image
 from volcenginesdkarkruntime import AsyncArk
 
+from backend.core.ai_provider_config import VideoProviderConfig, get_video_provider_config
 from backend.core.config import settings
 
 RESOLUTION_BASE = {
@@ -107,9 +108,10 @@ class AsyncTaskVideoProvider(VideoProvider):
 
     async def download_generated_video(self, video_url: str, output_path: Path) -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        provider_config = get_video_provider_config()
         timeout = httpx.Timeout(
             connect=30,
-            read=max(settings.ARK_DOWNLOAD_TIMEOUT_SECONDS, settings.SEEDANCE_DOWNLOAD_TIMEOUT_SECONDS, 30),
+            read=max(provider_config.download_timeout_seconds, 30),
             write=30,
             pool=30,
         )
@@ -564,32 +566,34 @@ class SeedanceVideoProvider(AsyncTaskVideoProvider):
     def __init__(
         self,
         *,
+        config: VideoProviderConfig | None = None,
         transport: ArkTransport | None = None,
         input_resolver: ArkInputResolver | None = None,
         request_builder: ArkRequestBuilder | None = None,
     ) -> None:
+        self.config = config or get_video_provider_config()
         self.transport = transport or self._build_transport()
         self.input_resolver = input_resolver or DataUrlArkInputResolver()
         self.request_builder = request_builder or ArkRequestBuilder()
 
     def _get_api_key(self) -> str:
-        api_key = settings.ACTIVE_ARK_API_KEY or settings.SEEDANCE_API_KEY
+        api_key = self.config.api_key
         if not api_key:
-            raise RuntimeError("Ark API Key 未配置，请先设置 ARK_API_KEY")
+            raise RuntimeError("Ark API Key 未配置，请先设置 config/ai_provider.toml 中的 video.api_key")
         return api_key
 
     def _build_transport(self) -> ArkTransport:
-        transport_mode = settings.ARK_TRANSPORT.lower()
+        transport_mode = self.config.transport.lower()
         common_kwargs = {
             "api_key": self._get_api_key(),
-            "base_url": settings.ARK_BASE_URL,
-            "timeout_seconds": settings.ARK_HTTP_TIMEOUT_SECONDS,
+            "base_url": self.config.base_url,
+            "timeout_seconds": self.config.timeout_seconds,
         }
         if transport_mode == "sdk":
             return ArkSdkTransport(**common_kwargs)
         if transport_mode == "rest":
             return ArkRestTransport(**common_kwargs)
-        raise RuntimeError(f"暂不支持的 Ark transport: {settings.ARK_TRANSPORT}")
+        raise RuntimeError(f"暂不支持的 Ark transport: {self.config.transport}")
 
     async def submit_image_to_video(
         self,
@@ -603,15 +607,15 @@ class SeedanceVideoProvider(AsyncTaskVideoProvider):
     ) -> SubmittedVideoTask:
         image_reference_url = await self.input_resolver.resolve_image_reference(input_path)
         request = self.request_builder.build_request(
-            model=settings.ACTIVE_ARK_VIDEO_MODEL_ID or settings.VIDEO_DEFAULT_MODEL,
+            model=self.config.model_id or self.config.default_model,
             prompt=prompt,
             image_reference_url=image_reference_url,
             resolution=resolution,
             aspect_ratio=aspect_ratio,
             duration_seconds=duration_seconds,
-            request_style=settings.ARK_REQUEST_STYLE.lower(),
-            camera_fixed=settings.ARK_CAMERA_FIXED,
-            watermark=settings.ARK_PROVIDER_WATERMARK,
+            request_style=self.config.request_style.lower(),
+            camera_fixed=self.config.camera_fixed,
+            watermark=self.config.watermark,
         )
         provider_task_id = await self.transport.create_task(request)
         return SubmittedVideoTask(
@@ -625,11 +629,12 @@ class SeedanceVideoProvider(AsyncTaskVideoProvider):
 
 
 def get_video_provider() -> VideoProvider:
-    if settings.VIDEO_PROVIDER == "local":
+    provider_config = get_video_provider_config()
+    if provider_config.provider == "local":
         return LocalVideoProvider()
-    if settings.VIDEO_PROVIDER == "seedance":
-        return SeedanceVideoProvider()
-    raise RuntimeError(f"暂不支持的视频 provider: {settings.VIDEO_PROVIDER}")
+    if provider_config.provider == "seedance":
+        return SeedanceVideoProvider(config=provider_config)
+    raise RuntimeError(f"暂不支持的视频 provider: {provider_config.provider}")
 
 
 def apply_logo_to_frame(frame: Image.Image, logo_path: Path) -> Image.Image:

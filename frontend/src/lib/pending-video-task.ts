@@ -3,6 +3,7 @@
 export type PendingShortVideoDraft = {
   id: string;
   task_type: "short";
+  service_tier: "standard" | "flex";
   created_at: string;
   image_file: File;
   scene_template_id: string;
@@ -23,6 +24,7 @@ export type PendingLongVideoSegmentDraft = {
 export type PendingLongVideoDraft = {
   id: string;
   task_type: "long";
+  service_tier: "standard" | "flex";
   created_at: string;
   scene_template_id: string;
   resolution: "480p" | "720p" | "1080p";

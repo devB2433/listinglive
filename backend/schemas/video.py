@@ -11,6 +11,7 @@ class SceneTemplateOut(BaseModel):
     id: UUID
     template_key: str
     name: str
+    property_types: list[str]
     sort_order: int
 
     class Config:
@@ -40,6 +41,7 @@ class CreateShortVideoTaskRequest(BaseModel):
     aspect_ratio: str = Field(pattern=r"^(16:9|9:16|1:1|adaptive)$")
     duration_seconds: int = Field(ge=2, le=10)
     logo_key: str | None = None
+    service_tier: str = Field(default="standard", pattern=r"^(standard|flex)$")
 
 
 class LongVideoSegmentInput(BaseModel):
@@ -76,11 +78,13 @@ class CreateLongVideoTaskRequest(BaseModel):
     duration_seconds: int = Field(ge=2, le=10)
     logo_key: str | None = None
     segments: list[LongVideoSegmentInput] | None = None
+    service_tier: str = Field(default="standard", pattern=r"^(standard|flex)$")
 
 
 class VideoTaskOut(BaseModel):
     id: UUID
     task_type: str
+    service_tier: str
     status: str
     image_keys: list[str]
     resolution: str
@@ -93,6 +97,7 @@ class VideoTaskOut(BaseModel):
     charge_status: str
     charged_at: datetime | None
     provider_name: str | None
+    provider_status: str | None
     video_key: str | None
     download_url: str | None
     error_message: str | None
@@ -113,6 +118,7 @@ class VideoTaskOut(BaseModel):
 class VideoTaskListItem(BaseModel):
     id: UUID
     task_type: str
+    service_tier: str
     status: str
     resolution: str
     aspect_ratio: str
@@ -122,6 +128,7 @@ class VideoTaskListItem(BaseModel):
     charged_quota_consumed: int
     charge_status: str
     charged_at: datetime | None
+    provider_status: str | None
     video_key: str | None
     download_url: str | None
     error_message: str | None

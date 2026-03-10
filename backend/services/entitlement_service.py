@@ -26,7 +26,7 @@ class PermissionDeniedError(AppError):
         super().__init__(code=code, status_code=403)
 
 
-def resolve_access_tier(subscription: Subscription | None, signup_bonus_remaining: int) -> str:
+def resolve_access_tier(subscription: Subscription | None, signup_bonus_remaining: int, invite_bonus_remaining: int) -> str:
     if subscription is not None:
         if subscription.plan_type == PLAN_TYPE_BASIC:
             return ACCESS_TIER_BASIC
@@ -34,7 +34,7 @@ def resolve_access_tier(subscription: Subscription | None, signup_bonus_remainin
             return ACCESS_TIER_PRO
         if subscription.plan_type == PLAN_TYPE_ULTIMATE:
             return ACCESS_TIER_ULTIMATE
-    if signup_bonus_remaining > 0:
+    if signup_bonus_remaining > 0 or invite_bonus_remaining > 0:
         return ACCESS_TIER_SIGNUP_BONUS
     return ACCESS_TIER_NONE
 
@@ -52,7 +52,11 @@ def get_tier_limits(access_tier: str, *, storage_days_display: int | None) -> Ca
 
 def build_access_context_from_snapshot(snapshot: dict) -> AccessContext:
     subscription = snapshot["subscription"]
-    access_tier = resolve_access_tier(subscription, snapshot["signup_bonus_remaining"])
+    access_tier = resolve_access_tier(
+        subscription,
+        snapshot["signup_bonus_remaining"],
+        snapshot.get("invite_bonus_remaining", 0),
+    )
     tier_entitlement = ENTITLEMENTS_BY_TIER[access_tier]
     storage_days_display = subscription.storage_days if subscription is not None else None
 
@@ -68,6 +72,7 @@ def build_access_context_from_snapshot(snapshot: dict) -> AccessContext:
         package_remaining=snapshot["package_remaining"],
         paid_package_remaining=snapshot["paid_package_remaining"],
         signup_bonus_remaining=snapshot["signup_bonus_remaining"],
+        invite_bonus_remaining=snapshot.get("invite_bonus_remaining", 0),
         total_available=snapshot["total_available"],
         capabilities=tuple(sorted(tier_entitlement.capabilities)),
         limits=get_tier_limits(access_tier, storage_days_display=storage_days_display),

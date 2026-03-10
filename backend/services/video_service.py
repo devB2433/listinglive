@@ -31,6 +31,7 @@ from backend.core.scene_templates import (
     SCENE_TEMPLATE_CATEGORY_LONG_UNIFIED,
     SCENE_TEMPLATE_CATEGORY_SHORT,
     load_scene_templates,
+    validate_scene_template_property_type,
 )
 from backend.models.long_video_segment import LongVideoSegment
 from backend.models.logo_asset import LogoAsset
@@ -60,6 +61,7 @@ from backend.services.video_merge_service import merge_segment_videos
 from backend.services.video_provider import (
     AsyncTaskVideoProvider,
     GeneratedVideo,
+    ProviderTaskSnapshot,
     SubmittedVideoTask,
     apply_logo_to_video_file,
     get_video_provider,
@@ -77,11 +79,17 @@ logger = logging.getLogger(__name__)
 VIDEO_TASK_STATUS_QUEUED = "queued"
 VIDEO_TASK_STATUS_PROCESSING = "processing"
 VIDEO_TASK_STATUS_MERGING = "merging"
+VIDEO_TASK_STATUS_SUBMITTING = "submitting"
+VIDEO_TASK_STATUS_SUBMITTED = "submitted"
+VIDEO_TASK_STATUS_PROVIDER_PROCESSING = "provider_processing"
+VIDEO_TASK_STATUS_FINALIZING = "finalizing"
 VIDEO_TASK_STATUS_SUCCEEDED = "succeeded"
 VIDEO_TASK_STATUS_FAILED = "failed"
 
 VIDEO_TASK_TYPE_SHORT = "short"
 VIDEO_TASK_TYPE_LONG = "long"
+TASK_SERVICE_TIER_STANDARD = "standard"
+TASK_SERVICE_TIER_FLEX = "flex"
 LONG_VIDEO_MIN_IMAGES = 2
 LONG_VIDEO_MAX_IMAGES = 10
 LONG_VIDEO_SEGMENT_STATUS_QUEUED = "queued"
@@ -93,12 +101,69 @@ ACTIVE_VIDEO_TASK_STATUSES = (
     VIDEO_TASK_STATUS_PROCESSING,
     VIDEO_TASK_STATUS_MERGING,
 )
+FLEX_POLLABLE_VIDEO_TASK_STATUSES = (
+    VIDEO_TASK_STATUS_SUBMITTED,
+    VIDEO_TASK_STATUS_PROVIDER_PROCESSING,
+)
+FLEX_SUBMIT_RETRYABLE_TASK_STATUSES = (
+    VIDEO_TASK_STATUS_QUEUED,
+    VIDEO_TASK_STATUS_SUBMITTING,
+)
 STALE_VIDEO_TASK_STATUSES = (
     VIDEO_TASK_STATUS_PROCESSING,
     VIDEO_TASK_STATUS_MERGING,
 )
 PROVIDER_QUEUE_LOCK_KEY = "video_provider:queue_claim_lock"
 TASK_EXECUTION_LOCK_PREFIX = "video_task:execution"
+
+
+def normalize_service_tier(service_tier: str | None) -> str:
+    return (service_tier or TASK_SERVICE_TIER_STANDARD).strip().lower()
+
+
+def validate_service_tier_for_task_type(*, task_type: str, service_tier: str | None) -> str:
+    normalized = normalize_service_tier(service_tier)
+    if normalized not in {TASK_SERVICE_TIER_STANDARD, TASK_SERVICE_TIER_FLEX}:
+        raise AppError("videos.serviceTier.invalid", status_code=400)
+    if task_type == VIDEO_TASK_TYPE_LONG and normalized == TASK_SERVICE_TIER_FLEX:
+        raise AppError("videos.long.flexUnavailable", status_code=400)
+    return normalized
+
+
+def is_flex_task(task: VideoTask) -> bool:
+    return normalize_service_tier(getattr(task, "service_tier", None)) == TASK_SERVICE_TIER_FLEX
+
+
+def is_flex_task_stale(task: VideoTask, *, now: datetime) -> bool:
+    started_at = task.provider_submitted_at or task.processing_started_at or task.updated_at or task.created_at
+    if started_at is None:
+        return False
+    return started_at <= now - timedelta(seconds=settings.FLEX_HARD_TIMEOUT_SECONDS)
+
+
+def build_next_flex_poll_at(*, now: datetime | None = None) -> datetime:
+    current_time = now or datetime.now(timezone.utc)
+    return current_time + timedelta(seconds=max(settings.FLEX_POLL_INTERVAL_SECONDS, 5))
+
+
+def merge_provider_task_ids(
+    *provider_task_maps: dict[str, str] | None,
+    provider_task_id: str | None = None,
+) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for provider_task_map in provider_task_maps:
+        if provider_task_map:
+            merged.update({key: value for key, value in provider_task_map.items() if value})
+    if provider_task_id:
+        merged["provider_task_id"] = provider_task_id
+    return merged
+
+
+def get_async_video_provider() -> AsyncTaskVideoProvider:
+    provider = get_video_provider()
+    if not isinstance(provider, AsyncTaskVideoProvider):
+        raise AppError("videos.flex.unsupportedProvider", status_code=503)
+    return provider
 
 
 async def sync_scene_templates(db: AsyncSession) -> None:
@@ -117,6 +182,7 @@ async def sync_scene_templates(db: AsyncSession) -> None:
                     category=config.category,
                     name=config.name,
                     prompt=config.prompt,
+                    property_types=list(config.property_types),
                     sort_order=config.sort_order,
                     is_enabled=config.is_enabled,
                 )
@@ -126,6 +192,7 @@ async def sync_scene_templates(db: AsyncSession) -> None:
         template.name = config.name
         template.category = config.category
         template.prompt = config.prompt
+        template.property_types = list(config.property_types)
         template.sort_order = config.sort_order
         template.is_enabled = config.is_enabled
 
@@ -141,12 +208,16 @@ async def sync_scene_templates_on_startup() -> None:
         await sync_scene_templates(db)
 
 
-async def list_scene_templates(db: AsyncSession, *, category: str = SCENE_TEMPLATE_CATEGORY_SHORT) -> list[SceneTemplate]:
-    stmt = (
-        select(SceneTemplate)
-        .where(SceneTemplate.is_enabled.is_(True), SceneTemplate.category == category)
-        .order_by(SceneTemplate.sort_order.asc(), SceneTemplate.created_at.asc())
-    )
+async def list_scene_templates(
+    db: AsyncSession,
+    *,
+    category: str = SCENE_TEMPLATE_CATEGORY_SHORT,
+    property_type: str | None = None,
+) -> list[SceneTemplate]:
+    stmt = select(SceneTemplate).where(SceneTemplate.is_enabled.is_(True), SceneTemplate.category == category)
+    if property_type:
+        stmt = stmt.where(SceneTemplate.property_types.contains([validate_scene_template_property_type(property_type)]))
+    stmt = stmt.order_by(SceneTemplate.sort_order.asc(), SceneTemplate.created_at.asc())
     return list((await db.execute(stmt)).scalars().all())
 
 
@@ -352,7 +423,9 @@ async def create_short_video_task(
     aspect_ratio: str,
     duration_seconds: int,
     logo_key: str | None,
+    service_tier: str = TASK_SERVICE_TIER_STANDARD,
 ) -> VideoTask:
+    service_tier = validate_service_tier_for_task_type(task_type=VIDEO_TASK_TYPE_SHORT, service_tier=service_tier)
     access_context = await build_user_access_context(db, user.id)
     if not has_capability(access_context, CAPABILITY_SHORT_VIDEO_CREATE):
         raise PermissionDeniedError("videos.short.permissionDenied")
@@ -382,7 +455,8 @@ async def create_short_video_task(
         user_id=user.id,
         scene_template_id=template.id,
         task_type=VIDEO_TASK_TYPE_SHORT,
-        status=VIDEO_TASK_STATUS_QUEUED,
+        service_tier=service_tier,
+        status=VIDEO_TASK_STATUS_SUBMITTING if service_tier == TASK_SERVICE_TIER_FLEX else VIDEO_TASK_STATUS_QUEUED,
         image_keys=[image_key],
         prompt=prompt,
         resolution=resolution,
@@ -411,7 +485,9 @@ async def create_long_video_task(
     duration_seconds: int,
     logo_key: str | None,
     segments: list[LongVideoSegmentInput] | None = None,
+    service_tier: str = TASK_SERVICE_TIER_STANDARD,
 ) -> VideoTask:
+    service_tier = validate_service_tier_for_task_type(task_type=VIDEO_TASK_TYPE_LONG, service_tier=service_tier)
     access_context = await build_user_access_context(db, user.id)
     if not has_capability(access_context, CAPABILITY_MERGE_VIDEO_CREATE):
         raise PermissionDeniedError("videos.long.permissionDenied")
@@ -461,6 +537,7 @@ async def create_long_video_task(
         user_id=user.id,
         scene_template_id=task_template.id,
         task_type=VIDEO_TASK_TYPE_LONG,
+        service_tier=service_tier,
         status=VIDEO_TASK_STATUS_QUEUED,
         image_keys=ordered_image_keys,
         prompt=task_template.prompt.strip(),
@@ -753,6 +830,9 @@ async def fail_video_task(
     task.status = VIDEO_TASK_STATUS_FAILED
     task.error_message = error_message
     task.finished_at = datetime.now(timezone.utc)
+    task.next_poll_at = None
+    if task.provider_status != "failed":
+        task.provider_status = "failed"
     charged_amount = int(getattr(task, "charged_quota_consumed", 0) or 0)
     if refund_quota_on_failure and charged_amount > 0 and task.quota_refunded_at is None:
         await refund_quota(db, task.user_id, charged_amount)
@@ -949,7 +1029,10 @@ async def wait_for_task_execution_turn(db: AsyncSession, task_id: UUID, *, allow
 
             eligible_stmt = (
                 select(VideoTask.id)
-                .where(VideoTask.status.in_(ACTIVE_VIDEO_TASK_STATUSES))
+                .where(
+                    VideoTask.service_tier == TASK_SERVICE_TIER_STANDARD,
+                    VideoTask.status.in_(ACTIVE_VIDEO_TASK_STATUSES),
+                )
                 .order_by(VideoTask.queued_at.asc(), VideoTask.created_at.asc(), VideoTask.id.asc())
                 .limit(settings.VIDEO_PROVIDER_CONCURRENCY_LIMIT)
             )
@@ -1031,7 +1114,10 @@ async def reconcile_stale_video_tasks(*, startup_mode: bool = False) -> int:
     )
     stmt = (
         select(VideoTask)
-        .where(VideoTask.status.in_(STALE_VIDEO_TASK_STATUSES))
+        .where(
+            VideoTask.service_tier == TASK_SERVICE_TIER_STANDARD,
+            VideoTask.status.in_(STALE_VIDEO_TASK_STATUSES),
+        )
         .order_by(VideoTask.updated_at.asc())
     )
     cleaned = 0
@@ -1063,6 +1149,66 @@ async def reconcile_stale_video_tasks_on_startup() -> None:
     cleaned = await reconcile_stale_video_tasks(startup_mode=True)
     if cleaned > 0:
         logger.warning("Reconciled %s stale video task(s) on startup.", cleaned)
+
+
+async def recover_flex_video_tasks_on_startup() -> int:
+    now = datetime.now(timezone.utc)
+    recovered = 0
+    async with AsyncSessionLocal() as db:
+        submit_stmt = (
+            select(VideoTask)
+            .where(
+                VideoTask.task_type == VIDEO_TASK_TYPE_SHORT,
+                VideoTask.service_tier == TASK_SERVICE_TIER_FLEX,
+                VideoTask.provider_task_id.is_(None),
+                VideoTask.status.in_(FLEX_SUBMIT_RETRYABLE_TASK_STATUSES),
+            )
+            .order_by(VideoTask.created_at.asc())
+        )
+        submit_tasks = list((await db.execute(submit_stmt)).scalars().all())
+        poll_stmt = (
+            select(VideoTask)
+            .where(
+                VideoTask.task_type == VIDEO_TASK_TYPE_SHORT,
+                VideoTask.service_tier == TASK_SERVICE_TIER_FLEX,
+                VideoTask.provider_task_id.is_not(None),
+                VideoTask.status.in_(FLEX_POLLABLE_VIDEO_TASK_STATUSES),
+            )
+            .order_by(VideoTask.created_at.asc())
+        )
+        poll_tasks = list((await db.execute(poll_stmt)).scalars().all())
+        finalize_stmt = (
+            select(VideoTask)
+            .where(
+                VideoTask.task_type == VIDEO_TASK_TYPE_SHORT,
+                VideoTask.service_tier == TASK_SERVICE_TIER_FLEX,
+                VideoTask.provider_task_id.is_not(None),
+                VideoTask.status == VIDEO_TASK_STATUS_FINALIZING,
+            )
+            .order_by(VideoTask.created_at.asc())
+        )
+        finalize_tasks = list((await db.execute(finalize_stmt)).scalars().all())
+        for task in poll_tasks:
+            task.next_poll_at = now
+            task.error_message = None
+            recovered += 1
+        await db.commit()
+
+    if submit_tasks:
+        from backend.tasks.video import submit_flex_short_video_task_job
+
+        for task in submit_tasks:
+            submit_flex_short_video_task_job.delay(str(task.id))
+        recovered += len(submit_tasks)
+
+    if finalize_tasks:
+        from backend.tasks.video import finalize_flex_short_video_task_job
+
+        for task in finalize_tasks:
+            finalize_flex_short_video_task_job.delay(str(task.id))
+        recovered += len(finalize_tasks)
+
+    return recovered
 
 
 async def cleanup_expired_video_files() -> int:
@@ -1143,6 +1289,7 @@ def to_video_task_out(task: VideoTask, *, long_segments: list[LongVideoSegment] 
     return VideoTaskOut(
         id=task.id,
         task_type=task.task_type,
+        service_tier=normalize_service_tier(task.service_tier),
         status=task.status,
         image_keys=task.image_keys,
         resolution=task.resolution,
@@ -1155,6 +1302,7 @@ def to_video_task_out(task: VideoTask, *, long_segments: list[LongVideoSegment] 
         charge_status=task.charge_status,
         charged_at=task.charged_at,
         provider_name=task.provider_name,
+        provider_status=task.provider_status,
         video_key=task.video_key,
         download_url=build_download_url(task),
         error_message=task.error_message,
@@ -1180,6 +1328,7 @@ def to_video_task_list_item(task: VideoTask, *, long_segments: list[LongVideoSeg
     return VideoTaskListItem(
         id=task.id,
         task_type=task.task_type,
+        service_tier=normalize_service_tier(task.service_tier),
         status=task.status,
         resolution=task.resolution,
         aspect_ratio=task.aspect_ratio,
@@ -1189,6 +1338,7 @@ def to_video_task_list_item(task: VideoTask, *, long_segments: list[LongVideoSeg
         charged_quota_consumed=task.charged_quota_consumed,
         charge_status=task.charge_status,
         charged_at=task.charged_at,
+        provider_status=task.provider_status,
         video_key=task.video_key,
         download_url=build_download_url(task),
         error_message=task.error_message,
@@ -1212,6 +1362,231 @@ def build_download_url(task: VideoTask) -> str | None:
     return f"/api/v1/videos/tasks/{task.id}/download"
 
 
+async def submit_flex_short_video_task(task_id: UUID | str) -> None:
+    if isinstance(task_id, str):
+        task_id = UUID(task_id)
+    async with AsyncSessionLocal() as db:
+        task = await db.get(VideoTask, task_id)
+        if task is None or task.task_type != VIDEO_TASK_TYPE_SHORT or not is_flex_task(task):
+            return
+        async with hold_task_execution_lock(task) as acquired:
+            if not acquired:
+                return
+            task = await db.get(VideoTask, task_id)
+            if task is None or task.provider_task_id or task.status in {VIDEO_TASK_STATUS_SUCCEEDED, VIDEO_TASK_STATUS_FAILED}:
+                return
+
+            provider = get_async_video_provider()
+            image_path = get_local_path(task.image_keys[0])
+            logo_path = get_local_path(task.logo_key) if task.logo_key else None
+            now = datetime.now(timezone.utc)
+            task.status = VIDEO_TASK_STATUS_SUBMITTING
+            task.error_message = None
+            task.processing_started_at = task.processing_started_at or now
+            task.finished_at = None
+            await db.commit()
+            await db.refresh(task)
+
+            try:
+                submitted = await asyncio.wait_for(
+                    provider.submit_image_to_video(
+                        input_path=image_path,
+                        prompt=task.prompt,
+                        resolution=task.resolution,
+                        aspect_ratio=task.aspect_ratio,
+                        duration_seconds=task.duration_seconds,
+                        logo_path=logo_path,
+                    ),
+                    timeout=settings.VIDEO_GENERATE_TIMEOUT_SECONDS,
+                )
+                now = datetime.now(timezone.utc)
+                task.provider_name = submitted.provider_name
+                task.provider_task_id = submitted.provider_task_id
+                task.provider_task_ids = merge_provider_task_ids(
+                    task.provider_task_ids,
+                    submitted.provider_task_ids,
+                    provider_task_id=submitted.provider_task_id,
+                )
+                task.provider_status = VIDEO_TASK_STATUS_SUBMITTED
+                task.provider_submitted_at = now
+                task.provider_last_polled_at = now
+                task.next_poll_at = build_next_flex_poll_at(now=now)
+                task.status = VIDEO_TASK_STATUS_SUBMITTED
+                await db.commit()
+            except Exception as exc:
+                await db.rollback()
+                _, cleanup_keys = await fail_video_task(db, task_id, str(exc), refund_quota_on_failure=True)
+                await db.commit()
+                await cleanup_storage_keys_best_effort(cleanup_keys)
+
+
+async def poll_flex_short_video_tasks(*, limit: int | None = None) -> int:
+    batch_size = limit or settings.FLEX_POLL_BATCH_SIZE
+    now = datetime.now(timezone.utc)
+    task_ids_to_finalize: list[str] = []
+    polled = 0
+    async with AsyncSessionLocal() as db:
+        stmt = (
+            select(VideoTask)
+            .where(
+                VideoTask.task_type == VIDEO_TASK_TYPE_SHORT,
+                VideoTask.service_tier == TASK_SERVICE_TIER_FLEX,
+                VideoTask.provider_task_id.is_not(None),
+                VideoTask.status.in_(FLEX_POLLABLE_VIDEO_TASK_STATUSES),
+                VideoTask.next_poll_at.is_not(None),
+                VideoTask.next_poll_at <= now,
+            )
+            .order_by(VideoTask.next_poll_at.asc(), VideoTask.created_at.asc())
+            .limit(batch_size)
+        )
+        tasks = list((await db.execute(stmt)).scalars().all())
+        if not tasks:
+            return 0
+
+        provider = get_async_video_provider()
+        for task in tasks:
+            polled += 1
+            if is_flex_task_stale(task, now=now):
+                _, cleanup_keys = await fail_video_task(
+                    db,
+                    task.id,
+                    "videos.flex.timeout",
+                    refund_quota_on_failure=True,
+                )
+                await db.commit()
+                await cleanup_storage_keys_best_effort(cleanup_keys)
+                continue
+
+            try:
+                snapshot = await provider.get_video_task(task.provider_task_id)
+                current_time = datetime.now(timezone.utc)
+                task.provider_last_polled_at = current_time
+                task.provider_status = snapshot.status
+                task.provider_task_ids = merge_provider_task_ids(
+                    task.provider_task_ids,
+                    snapshot.provider_task_ids,
+                    provider_task_id=task.provider_task_id,
+                )
+                task.error_message = None
+                if snapshot.status == "succeeded":
+                    task.provider_completed_at = current_time
+                    task.status = VIDEO_TASK_STATUS_FINALIZING
+                    task.next_poll_at = None
+                    task_ids_to_finalize.append(str(task.id))
+                elif snapshot.status == "failed":
+                    _, cleanup_keys = await fail_video_task(
+                        db,
+                        task.id,
+                        snapshot.error_message or "videos.provider.failed",
+                        refund_quota_on_failure=True,
+                    )
+                    await db.commit()
+                    await cleanup_storage_keys_best_effort(cleanup_keys)
+                    continue
+                else:
+                    task.status = VIDEO_TASK_STATUS_PROVIDER_PROCESSING
+                    task.next_poll_at = build_next_flex_poll_at(now=current_time)
+                await db.commit()
+            except Exception as exc:
+                await db.rollback()
+                task = await db.get(VideoTask, task.id)
+                if task is None:
+                    continue
+                if is_retryable_provider_error(exc):
+                    current_time = datetime.now(timezone.utc)
+                    task.provider_last_polled_at = current_time
+                    task.provider_status = task.provider_status or VIDEO_TASK_STATUS_PROVIDER_PROCESSING
+                    task.status = VIDEO_TASK_STATUS_PROVIDER_PROCESSING
+                    task.next_poll_at = build_next_flex_poll_at(now=current_time)
+                    await db.commit()
+                    continue
+                _, cleanup_keys = await fail_video_task(db, task.id, str(exc), refund_quota_on_failure=True)
+                await db.commit()
+                await cleanup_storage_keys_best_effort(cleanup_keys)
+
+    if task_ids_to_finalize:
+        from backend.tasks.video import finalize_flex_short_video_task_job
+
+        for task_id in task_ids_to_finalize:
+            finalize_flex_short_video_task_job.delay(task_id)
+    return polled
+
+
+async def finalize_flex_short_video_task(task_id: UUID | str) -> None:
+    if isinstance(task_id, str):
+        task_id = UUID(task_id)
+    async with AsyncSessionLocal() as db:
+        task = await db.get(VideoTask, task_id)
+        if task is None or task.task_type != VIDEO_TASK_TYPE_SHORT or not is_flex_task(task):
+            return
+        async with hold_task_execution_lock(task) as acquired:
+            if not acquired:
+                return
+            task = await db.get(VideoTask, task_id)
+            if task is None or task.status in {VIDEO_TASK_STATUS_SUCCEEDED, VIDEO_TASK_STATUS_FAILED}:
+                return
+            if not task.provider_task_id:
+                _, cleanup_keys = await fail_video_task(db, task_id, "videos.flex.providerTaskMissing", refund_quota_on_failure=True)
+                await db.commit()
+                await cleanup_storage_keys_best_effort(cleanup_keys)
+                return
+
+            provider = get_async_video_provider()
+            output_key: str | None = None
+            output_path: Path | None = None
+            temp_output_path: Path | None = None
+            try:
+                snapshot: ProviderTaskSnapshot = await provider.get_video_task(task.provider_task_id)
+                if snapshot.status != "succeeded" or not snapshot.video_url:
+                    task.provider_last_polled_at = datetime.now(timezone.utc)
+                    task.provider_status = snapshot.status
+                    task.status = VIDEO_TASK_STATUS_PROVIDER_PROCESSING
+                    task.next_poll_at = build_next_flex_poll_at()
+                    await db.commit()
+                    return
+
+                current_time = datetime.now(timezone.utc)
+                task.status = VIDEO_TASK_STATUS_FINALIZING
+                task.provider_status = snapshot.status
+                task.provider_last_polled_at = current_time
+                task.provider_completed_at = task.provider_completed_at or current_time
+                task.next_poll_at = None
+                await db.commit()
+                await db.refresh(task)
+
+                output_key = create_output_key()
+                output_path = get_local_path(output_key)
+                temp_output_path = create_temporary_output_path(output_path)
+                await provider.download_generated_video(snapshot.video_url, temp_output_path)
+                if task.logo_key:
+                    logo_path = get_local_path(task.logo_key)
+                    if logo_path.exists():
+                        await asyncio.to_thread(apply_logo_to_video_file, temp_output_path, logo_path)
+                temp_output_path.replace(output_path)
+
+                task.video_key = output_key
+                task.provider_name = task.provider_name or provider.provider_name
+                task.provider_task_ids = merge_provider_task_ids(
+                    task.provider_task_ids,
+                    snapshot.provider_task_ids,
+                    provider_task_id=task.provider_task_id,
+                )
+                await settle_task_quota_charge(db, task)
+                task.status = VIDEO_TASK_STATUS_SUCCEEDED
+                task.finished_at = datetime.now(timezone.utc)
+                task.expires_at = datetime.now(timezone.utc) + timedelta(days=await get_storage_days_for_user(db, task.user_id))
+                await db.commit()
+            except Exception as exc:
+                await db.rollback()
+                _, cleanup_keys = await fail_video_task(db, task_id, str(exc), refund_quota_on_failure=True)
+                await db.commit()
+                if output_key:
+                    cleanup_keys.append(output_key)
+                await cleanup_storage_keys_best_effort(cleanup_keys)
+                safe_delete_local_path(temp_output_path)
+                safe_delete_local_path(output_path)
+
+
 async def process_short_video_task(task_id: UUID | str) -> None:
     if isinstance(task_id, str):
         task_id = UUID(task_id)
@@ -1219,6 +1594,8 @@ async def process_short_video_task(task_id: UUID | str) -> None:
         task = await db.get(VideoTask, task_id)
         if task is None:
             return
+        if is_flex_task(task):
+            return await submit_flex_short_video_task(task_id)
         async with hold_task_execution_lock(task) as acquired:
             if not acquired:
                 return
@@ -1245,6 +1622,12 @@ async def process_short_video_task(task_id: UUID | str) -> None:
                 task.video_key = output_key
                 task.provider_name = generated.provider_name
                 task.provider_task_ids = generated.provider_task_ids
+                task.provider_task_id = generated.provider_task_ids.get("provider_task_id")
+                task.provider_status = "succeeded"
+                task.provider_submitted_at = task.provider_submitted_at or datetime.now(timezone.utc)
+                task.provider_last_polled_at = datetime.now(timezone.utc)
+                task.provider_completed_at = datetime.now(timezone.utc)
+                task.next_poll_at = None
                 await settle_task_quota_charge(db, task)
                 task.status = VIDEO_TASK_STATUS_SUCCEEDED
                 task.finished_at = datetime.now(timezone.utc)

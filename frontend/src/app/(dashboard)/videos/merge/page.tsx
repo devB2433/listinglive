@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 import { useLocale } from "@/components/providers/locale-provider";
-import { type SceneTemplate, type UserLogo } from "@/lib/api";
+import { type SceneTemplate, type SceneTemplatePropertyType, type UserLogo } from "@/lib/api";
 import { useDashboardSession } from "@/components/providers/session-provider";
 import { getAccessTierLabel, hasCapability } from "@/lib/capabilities";
 import { getSceneTemplateDisplayName } from "@/lib/locale";
@@ -14,7 +14,7 @@ import { createPendingLongVideoDraft } from "@/lib/pending-video-task";
 import { getCachedSceneTemplates, getCachedUserLogos } from "@/lib/video-config-cache";
 
 type EditMode = "unified" | "custom";
-const ALL_ASPECT_RATIOS = ["16:9", "9:16", "1:1", "adaptive"] as const;
+const PROPERTY_TYPE_OPTIONS: SceneTemplatePropertyType[] = ["standard_home", "luxury_home", "apartment_rental"];
 
 type SegmentDraft = {
   id: string;
@@ -41,8 +41,9 @@ export default function VideoMergePage() {
   const [segments, setSegments] = useState<SegmentDraft[]>([]);
   const [sceneTemplateId, setSceneTemplateId] = useState("");
   const [segmentTemplateSeedId, setSegmentTemplateSeedId] = useState("");
+  const [propertyType, setPropertyType] = useState<SceneTemplatePropertyType>("standard_home");
   const resolution = "1080p" as const;
-  const [aspectRatio, setAspectRatio] = useState<"16:9" | "9:16" | "1:1" | "adaptive">("16:9");
+  const aspectRatio = "16:9" as const;
   const [durationSeconds, setDurationSeconds] = useState(4);
   const [editMode, setEditMode] = useState<EditMode>("unified");
   const [enableLogo, setEnableLogo] = useState(false);
@@ -60,26 +61,47 @@ export default function VideoMergePage() {
   const canUseCustomMode = supportsAdvancedLongVideo;
 
   useEffect(() => {
-    if (bootstrapped) return;
+    let cancelled = false;
     Promise.all([
-      getCachedSceneTemplates(accessToken, "short"),
-      getCachedSceneTemplates(accessToken, "long_unified"),
+      getCachedSceneTemplates(accessToken, "short", { propertyType }),
+      getCachedSceneTemplates(accessToken, "long_unified", { propertyType }),
       getCachedUserLogos(accessToken),
     ])
       .then(([shortTemplateData, unifiedTemplateData, logoData]) => {
+        if (cancelled) return;
         setSegmentTemplates(shortTemplateData);
         setUnifiedTemplates(unifiedTemplateData);
         setLogos(logoData);
-        if (!sceneTemplateId && unifiedTemplateData.length > 0) setSceneTemplateId(unifiedTemplateData[0].id);
-        if (!segmentTemplateSeedId && shortTemplateData.length > 0) setSegmentTemplateSeedId(shortTemplateData[0].id);
         const defaultLogo = logoData.find((item) => item.is_default) || logoData[0];
-        if (!selectedLogoKey && defaultLogo) setSelectedLogoKey(defaultLogo.key);
+        const fallbackUnifiedTemplateId = unifiedTemplateData[0]?.id ?? "";
+        const fallbackSegmentTemplateId = shortTemplateData[0]?.id ?? "";
+        setSceneTemplateId((current) =>
+          current && unifiedTemplateData.some((template) => template.id === current) ? current : fallbackUnifiedTemplateId,
+        );
+        setSegmentTemplateSeedId((current) =>
+          current && shortTemplateData.some((template) => template.id === current) ? current : fallbackSegmentTemplateId,
+        );
+        setSegments((current) =>
+          current.map((segment) => ({
+            ...segment,
+            sceneTemplateId: shortTemplateData.some((template) => template.id === segment.sceneTemplateId)
+              ? segment.sceneTemplateId
+              : fallbackSegmentTemplateId,
+          })),
+        );
+        setSelectedLogoKey((current) =>
+          current && logoData.some((logo) => logo.key === current) ? current : (defaultLogo?.key ?? ""),
+        );
       })
       .catch((err) => {
+        if (cancelled) return;
         setFormError(err instanceof Error ? err.message : translate("dashboard.longVideo.createFailed"));
       })
       .finally(() => setBootstrapped(true));
-  }, [accessToken, bootstrapped, sceneTemplateId, segmentTemplateSeedId, selectedLogoKey, translate]);
+    return () => {
+      cancelled = true;
+    };
+  }, [accessToken, propertyType, translate]);
 
   function buildSegmentDraft(file: File, index: number): SegmentDraft {
     return {
@@ -214,6 +236,7 @@ export default function VideoMergePage() {
         aspect_ratio: aspectRatio,
         duration_seconds: editMode === "custom" ? firstSegment?.durationSeconds || durationSeconds : durationSeconds,
         logo_key: enableLogo ? selectedLogoKey : null,
+        service_tier: "standard",
         edit_mode: editMode,
         segments: segments.map((segment) => ({
           id: segment.id,
@@ -287,6 +310,26 @@ export default function VideoMergePage() {
             )}
           </div>
 
+          <div>
+            <label className="mb-2 block text-sm font-medium text-gray-700">{translate("dashboard.longVideo.propertyTypeLabel")}</label>
+            <p className="mb-3 text-xs text-gray-500">{translate("dashboard.longVideo.propertyTypeHint")}</p>
+            <div className="grid gap-3 md:grid-cols-3">
+              {PROPERTY_TYPE_OPTIONS.map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  onClick={() => setPropertyType(option)}
+                  className={`rounded-xl border px-4 py-3 text-left ${
+                    propertyType === option ? "border-blue-600 bg-blue-50" : "border-gray-200 bg-white"
+                  }`}
+                >
+                  <p className="text-sm font-medium text-gray-900">{renderPropertyTypeLabel(translate, option)}</p>
+                  <p className="mt-1 text-xs text-gray-500">{renderPropertyTypeHint(translate, option)}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+
           <div className="grid gap-4 md:grid-cols-3">
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">{translate("dashboard.shortVideo.resolutionLabel")}</label>
@@ -297,19 +340,8 @@ export default function VideoMergePage() {
             </div>
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">{translate("dashboard.shortVideo.aspectRatioLabel")}</label>
-              <select
-                value={aspectRatio}
-                onChange={(e) => setAspectRatio(e.target.value as "16:9" | "9:16" | "1:1" | "adaptive")}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              >
-                {ALL_ASPECT_RATIOS.map((value) => (
-                  <option key={value} value={value} disabled={!quota.limits.allowed_aspect_ratios.includes(value)}>
-                    {quota.limits.allowed_aspect_ratios.includes(value)
-                      ? value
-                      : `${value} · ${translate("dashboard.shortVideo.unavailableOptionSuffix")}`}
-                  </option>
-                ))}
-              </select>
+              <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">16:9</div>
+              <p className="mt-1 text-xs text-gray-500">{translate("dashboard.shortVideo.aspectRatioFixedHint")}</p>
             </div>
           </div>
 
@@ -358,13 +390,18 @@ export default function VideoMergePage() {
                     <select
                       value={sceneTemplateId}
                       onChange={(e) => setSceneTemplateId(e.target.value)}
+                      disabled={unifiedTemplates.length === 0}
                       className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
                     >
-                      {unifiedTemplates.map((template) => (
-                        <option key={template.id} value={template.id}>
-                          {getTemplateLabel(template)}
-                        </option>
-                      ))}
+                      {unifiedTemplates.length === 0 ? (
+                        <option value="">{translate("dashboard.longVideo.noTemplatesForPropertyType")}</option>
+                      ) : (
+                        unifiedTemplates.map((template) => (
+                          <option key={template.id} value={template.id}>
+                            {getTemplateLabel(template)}
+                          </option>
+                        ))
+                      )}
                     </select>
                   </div>
                   <div>
@@ -395,14 +432,18 @@ export default function VideoMergePage() {
                     <select
                       value={segmentTemplateSeedId}
                       onChange={(e) => setSegmentTemplateSeedId(e.target.value)}
-                      disabled={!canUseCustomMode}
+                      disabled={!canUseCustomMode || segmentTemplates.length === 0}
                       className="rounded-md border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100"
                     >
-                      {segmentTemplates.map((template) => (
-                        <option key={template.id} value={template.id}>
-                          {getTemplateLabel(template)}
-                        </option>
-                      ))}
+                      {segmentTemplates.length === 0 ? (
+                        <option value="">{translate("dashboard.longVideo.noTemplatesForPropertyType")}</option>
+                      ) : (
+                        segmentTemplates.map((template) => (
+                          <option key={template.id} value={template.id}>
+                            {getTemplateLabel(template)}
+                          </option>
+                        ))
+                      )}
                     </select>
                     <button
                       type="button"
@@ -469,14 +510,18 @@ export default function VideoMergePage() {
                           <select
                             value={segment.sceneTemplateId}
                             onChange={(e) => updateSegment(segment.id, { sceneTemplateId: e.target.value })}
-                            disabled={!canUseCustomMode || !supportsPerImageTemplate}
+                            disabled={!canUseCustomMode || !supportsPerImageTemplate || segmentTemplates.length === 0}
                             className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100"
                           >
-                            {segmentTemplates.map((template) => (
-                              <option key={template.id} value={template.id}>
-                                {getTemplateLabel(template)}
-                              </option>
-                            ))}
+                            {segmentTemplates.length === 0 ? (
+                              <option value="">{translate("dashboard.longVideo.noTemplatesForPropertyType")}</option>
+                            ) : (
+                              segmentTemplates.map((template) => (
+                                <option key={template.id} value={template.id}>
+                                  {getTemplateLabel(template)}
+                                </option>
+                              ))
+                            )}
                           </select>
                         </div>
                         <div>
@@ -527,7 +572,7 @@ export default function VideoMergePage() {
                 ) : (
                   <div className="space-y-2">
                     <p className="text-sm text-amber-700">{translate("dashboard.longVideo.noLogoAvailable")}</p>
-                    <Link href="/account" className="inline-flex rounded-md border px-3 py-2 text-sm text-blue-600 hover:bg-blue-50">
+                    <Link href="/account/logos" className="inline-flex rounded-md border px-3 py-2 text-sm text-blue-600 hover:bg-blue-50">
                       {translate("dashboard.shortVideo.goUploadLogo")}
                     </Link>
                   </div>
@@ -575,4 +620,22 @@ export default function VideoMergePage() {
       </div>
     </div>
   );
+}
+
+function renderPropertyTypeLabel(
+  translate: (key: string) => string,
+  propertyType: SceneTemplatePropertyType,
+) {
+  if (propertyType === "luxury_home") return translate("common.propertyTypeLuxuryHome");
+  if (propertyType === "apartment_rental") return translate("common.propertyTypeApartmentRental");
+  return translate("common.propertyTypeStandardHome");
+}
+
+function renderPropertyTypeHint(
+  translate: (key: string) => string,
+  propertyType: SceneTemplatePropertyType,
+) {
+  if (propertyType === "luxury_home") return translate("common.propertyTypeLuxuryHomeHint");
+  if (propertyType === "apartment_rental") return translate("common.propertyTypeApartmentRentalHint");
+  return translate("common.propertyTypeStandardHomeHint");
 }

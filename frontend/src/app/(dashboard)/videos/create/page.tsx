@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { useLocale } from "@/components/providers/locale-provider";
 import {
   type SceneTemplate,
+  type SceneTemplatePropertyType,
   type UserLogo,
 } from "@/lib/api";
 import { useDashboardSession } from "@/components/providers/session-provider";
@@ -15,8 +16,8 @@ import { getSceneTemplateDisplayName } from "@/lib/locale";
 import { createPendingShortVideoDraft } from "@/lib/pending-video-task";
 import { getCachedSceneTemplates, getCachedUserLogos } from "@/lib/video-config-cache";
 
-const ALL_ASPECT_RATIOS = ["16:9", "9:16", "1:1", "adaptive"] as const;
 const ALL_DURATIONS = [2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
+const PROPERTY_TYPE_OPTIONS: SceneTemplatePropertyType[] = ["standard_home", "luxury_home", "apartment_rental"];
 
 export default function VideoCreatePage() {
   const { accessToken, quota } = useDashboardSession();
@@ -34,8 +35,10 @@ export default function VideoCreatePage() {
   const [selectedLogoKey, setSelectedLogoKey] = useState("");
   const [sceneTemplateId, setSceneTemplateId] = useState("");
   const resolution = "1080p" as const;
-  const [aspectRatio, setAspectRatio] = useState<"16:9" | "9:16" | "1:1" | "adaptive">("16:9");
+  const aspectRatio = "16:9" as const;
   const [durationSeconds, setDurationSeconds] = useState(2);
+  const [serviceTier, setServiceTier] = useState<"standard" | "flex">("standard");
+  const [propertyType, setPropertyType] = useState<SceneTemplatePropertyType>("standard_home");
 
   const fixedDuration = quota.limits.short_fixed_duration_seconds;
   const durationEditable = quota.limits.short_duration_editable;
@@ -43,20 +46,32 @@ export default function VideoCreatePage() {
     getSceneTemplateDisplayName(translate, template.template_key, template.name);
 
   useEffect(() => {
-    if (bootstrapped) return;
-    Promise.all([getCachedSceneTemplates(accessToken, "short"), getCachedUserLogos(accessToken)])
+    let cancelled = false;
+    Promise.all([
+      getCachedSceneTemplates(accessToken, "short", { propertyType }),
+      getCachedUserLogos(accessToken),
+    ])
       .then(([templateData, logoData]) => {
+        if (cancelled) return;
         setTemplates(templateData);
         setLogos(logoData);
-        if (!sceneTemplateId && templateData.length > 0) setSceneTemplateId(templateData[0].id);
         const defaultLogo = logoData.find((item) => item.is_default) || logoData[0];
-        if (!selectedLogoKey && defaultLogo) setSelectedLogoKey(defaultLogo.key);
+        setSceneTemplateId((current) =>
+          current && templateData.some((template) => template.id === current) ? current : (templateData[0]?.id ?? ""),
+        );
+        setSelectedLogoKey((current) =>
+          current && logoData.some((logo) => logo.key === current) ? current : (defaultLogo?.key ?? ""),
+        );
       })
       .catch((err) => {
+        if (cancelled) return;
         setFormError(err instanceof Error ? err.message : translate("dashboard.shortVideo.createFailed"));
       })
       .finally(() => setBootstrapped(true));
-  }, [accessToken, bootstrapped, sceneTemplateId, selectedLogoKey, translate]);
+    return () => {
+      cancelled = true;
+    };
+  }, [accessToken, propertyType, translate]);
 
   useEffect(() => {
     if (!durationEditable && fixedDuration && durationSeconds !== fixedDuration) {
@@ -94,6 +109,7 @@ export default function VideoCreatePage() {
         aspect_ratio: aspectRatio,
         duration_seconds: durationEditable ? durationSeconds : fixedDuration || durationSeconds,
         logo_key: enableLogo ? selectedLogoKey : null,
+        service_tier: serviceTier,
       });
       router.push(`/videos/tasks?draft=${encodeURIComponent(draft.id)}`);
     } catch (err) {
@@ -174,7 +190,7 @@ export default function VideoCreatePage() {
                 ) : (
                   <div className="space-y-2">
                     <p className="text-sm text-amber-700">{translate("dashboard.shortVideo.noLogoYet")}</p>
-                    <Link href="/account" className="inline-flex rounded-md border px-3 py-2 text-sm text-blue-600 hover:bg-blue-50">
+                    <Link href="/account/logos" className="inline-flex rounded-md border px-3 py-2 text-sm text-blue-600 hover:bg-blue-50">
                       {translate("dashboard.shortVideo.goUploadLogo")}
                     </Link>
                   </div>
@@ -184,17 +200,42 @@ export default function VideoCreatePage() {
           </div>
 
           <div>
+            <label className="mb-2 block text-sm font-medium text-gray-700">{translate("dashboard.shortVideo.propertyTypeLabel")}</label>
+            <p className="mb-3 text-xs text-gray-500">{translate("dashboard.shortVideo.propertyTypeHint")}</p>
+            <div className="grid gap-3 md:grid-cols-3">
+              {PROPERTY_TYPE_OPTIONS.map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  onClick={() => setPropertyType(option)}
+                  className={`rounded-xl border px-4 py-3 text-left ${
+                    propertyType === option ? "border-blue-600 bg-blue-50" : "border-gray-200 bg-white"
+                  }`}
+                >
+                  <p className="text-sm font-medium text-gray-900">{renderPropertyTypeLabel(translate, option)}</p>
+                  <p className="mt-1 text-xs text-gray-500">{renderPropertyTypeHint(translate, option)}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
             <label className="mb-1 block text-sm font-medium text-gray-700">{translate("dashboard.shortVideo.templateLabel")}</label>
             <select
               value={sceneTemplateId}
               onChange={(e) => setSceneTemplateId(e.target.value)}
+              disabled={templates.length === 0}
               className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
             >
-              {templates.map((template) => (
-                <option key={template.id} value={template.id}>
-                  {getTemplateLabel(template)}
-                </option>
-              ))}
+              {templates.length === 0 ? (
+                <option value="">{translate("dashboard.shortVideo.noTemplatesForPropertyType")}</option>
+              ) : (
+                templates.map((template) => (
+                  <option key={template.id} value={template.id}>
+                    {getTemplateLabel(template)}
+                  </option>
+                ))
+              )}
             </select>
           </div>
 
@@ -208,19 +249,8 @@ export default function VideoCreatePage() {
             </div>
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">{translate("dashboard.shortVideo.aspectRatioLabel")}</label>
-              <select
-                value={aspectRatio}
-                onChange={(e) => setAspectRatio(e.target.value as "16:9" | "9:16" | "1:1" | "adaptive")}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-              >
-                {ALL_ASPECT_RATIOS.map((value) => (
-                  <option key={value} value={value} disabled={!quota.limits.allowed_aspect_ratios.includes(value)}>
-                    {quota.limits.allowed_aspect_ratios.includes(value)
-                      ? value
-                      : `${value} · ${translate("dashboard.shortVideo.unavailableOptionSuffix")}`}
-                  </option>
-                ))}
-              </select>
+              <div className="rounded-md border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">16:9</div>
+              <p className="mt-1 text-xs text-gray-500">{translate("dashboard.shortVideo.aspectRatioFixedHint")}</p>
             </div>
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">{translate("dashboard.shortVideo.durationLabel")}</label>
@@ -238,6 +268,32 @@ export default function VideoCreatePage() {
                   </option>
                 ))}
               </select>
+            </div>
+          </div>
+
+          <div>
+            <label className="mb-2 block text-sm font-medium text-gray-700">{translate("dashboard.shortVideo.serviceTierLabel")}</label>
+            <div className="grid gap-3 md:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => setServiceTier("standard")}
+                className={`rounded-xl border px-4 py-3 text-left ${
+                  serviceTier === "standard" ? "border-blue-600 bg-blue-50" : "border-gray-200 bg-white"
+                }`}
+              >
+                <p className="text-sm font-medium text-gray-900">{translate("dashboard.shortVideo.serviceTierStandardTitle")}</p>
+                <p className="mt-1 text-xs text-gray-500">{translate("dashboard.shortVideo.serviceTierStandardHint")}</p>
+              </button>
+              <button
+                type="button"
+                disabled
+                aria-disabled="true"
+                className="cursor-not-allowed rounded-xl border border-gray-200 bg-gray-100 px-4 py-3 text-left opacity-60"
+              >
+                <p className="text-sm font-medium text-gray-900">{translate("dashboard.shortVideo.serviceTierFlexTitle")}</p>
+                <p className="mt-1 text-xs text-gray-500">{translate("dashboard.shortVideo.serviceTierFlexHint")}</p>
+                <p className="mt-2 text-xs font-medium text-gray-500">{translate("dashboard.shortVideo.serviceTierFlexDisabledHint")}</p>
+              </button>
             </div>
           </div>
 
@@ -289,4 +345,22 @@ function PageLoading({ text }: { text: string }) {
       <p className="text-sm text-gray-500">{text}</p>
     </div>
   );
+}
+
+function renderPropertyTypeLabel(
+  translate: (key: string) => string,
+  propertyType: SceneTemplatePropertyType,
+) {
+  if (propertyType === "luxury_home") return translate("common.propertyTypeLuxuryHome");
+  if (propertyType === "apartment_rental") return translate("common.propertyTypeApartmentRental");
+  return translate("common.propertyTypeStandardHome");
+}
+
+function renderPropertyTypeHint(
+  translate: (key: string) => string,
+  propertyType: SceneTemplatePropertyType,
+) {
+  if (propertyType === "luxury_home") return translate("common.propertyTypeLuxuryHomeHint");
+  if (propertyType === "apartment_rental") return translate("common.propertyTypeApartmentRentalHint");
+  return translate("common.propertyTypeStandardHomeHint");
 }

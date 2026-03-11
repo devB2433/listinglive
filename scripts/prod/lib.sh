@@ -51,6 +51,7 @@ load_env() {
   export BACKUP_DAILY_RETENTION_DAYS="${BACKUP_DAILY_RETENTION_DAYS:-7}"
   export BACKUP_WEEKLY_RETENTION_DAYS="${BACKUP_WEEKLY_RETENTION_DAYS:-28}"
   export APP_GIT_BRANCH="${APP_GIT_BRANCH:-main}"
+  export CONTAINER_TIMEZONE="${CONTAINER_TIMEZONE:-$(detect_host_timezone)}"
 }
 
 require_env_values() {
@@ -58,6 +59,27 @@ require_env_values() {
   for name in "$@"; do
     [[ -n "${!name:-}" ]] || fail "Required environment variable is empty: ${name}"
   done
+}
+
+detect_host_timezone() {
+  if [[ -n "${CONTAINER_TIMEZONE:-}" ]]; then
+    printf '%s\n' "${CONTAINER_TIMEZONE}"
+    return 0
+  fi
+
+  if [[ -f /etc/timezone ]]; then
+    tr -d '[:space:]' < /etc/timezone
+    return 0
+  fi
+
+  local tz_target
+  tz_target="$(readlink -f /etc/localtime 2>/dev/null || true)"
+  if [[ -n "${tz_target}" && "${tz_target}" == /usr/share/zoneinfo/* ]]; then
+    printf '%s\n' "${tz_target#/usr/share/zoneinfo/}"
+    return 0
+  fi
+
+  printf 'UTC\n'
 }
 
 ensure_prod_dirs() {

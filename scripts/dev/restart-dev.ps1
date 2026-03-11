@@ -84,6 +84,17 @@ function Reset-LogFile([string]$Path) {
   }
 }
 
+function Get-ContainerTimeZone {
+  try {
+    $windowsId = (Get-TimeZone).Id
+    $ianaId = $null
+    if ([System.TimeZoneInfo]::TryConvertWindowsIdToIanaId($windowsId, [ref]$ianaId) -and $ianaId) {
+      return $ianaId
+    }
+  } catch {}
+  return 'UTC'
+}
+
 function Wait-HttpReady([string]$Url, [int]$TimeoutSeconds = 90) {
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
   while ((Get-Date) -lt $deadline) {
@@ -125,6 +136,7 @@ if (-not (Test-Path 'frontend/.env.local')) {
 }
 
 # === Phase 4: Infrastructure ===
+$env:CONTAINER_TIMEZONE = Get-ContainerTimeZone
 docker-compose up -d postgres redis | Out-Null
 
 # === Phase 5: Reset log files ===

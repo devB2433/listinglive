@@ -2,6 +2,8 @@ services:
   reverse-proxy:
     image: nginx:1.27-alpine
     restart: unless-stopped
+    environment:
+      TZ: ${CONTAINER_TIMEZONE:-UTC}
     depends_on:
       - frontend
       - api
@@ -9,6 +11,7 @@ services:
       - "${PROXY_PORT:-3001}:80"
     volumes:
       - ./deploy/nginx/listinglive.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/localtime:/etc/localtime:ro
 
   frontend:
     build:
@@ -19,7 +22,10 @@ services:
     restart: unless-stopped
     environment:
       NODE_ENV: production
+      TZ: ${CONTAINER_TIMEZONE:-UTC}
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
     healthcheck:
       test:
         [
@@ -34,10 +40,12 @@ services:
     image: postgres:15-alpine
     restart: unless-stopped
     environment:
+      TZ: ${CONTAINER_TIMEZONE:-UTC}
       POSTGRES_USER: ${POSTGRES_USER:-listinglive}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-listinglive}
       POSTGRES_DB: ${POSTGRES_DB:-listinglive}
     volumes:
+      - /etc/localtime:/etc/localtime:ro
       - listinglive_pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-listinglive} -d ${POSTGRES_DB:-listinglive}"]
@@ -48,7 +56,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    environment:
+      TZ: ${CONTAINER_TIMEZONE:-UTC}
     command: redis-server --save 60 1000 --appendonly no
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -63,6 +75,7 @@ services:
     env_file:
       - ${APP_ENV_FILE:-/opt/listinglive/config/.env.prod}
     environment:
+      TZ: ${CONTAINER_TIMEZONE:-UTC}
       STORAGE_LOCAL_ROOT: /data/storage
       AI_PROVIDER_CONFIG_PATH: /run/listinglive/ai_provider.toml
     command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --proxy-headers
@@ -72,6 +85,7 @@ services:
       redis:
         condition: service_healthy
     volumes:
+      - /etc/localtime:/etc/localtime:ro
       - ${APP_STORAGE_ROOT:-/opt/listinglive/data/storage}:/data/storage
       - ${AI_PROVIDER_TOML_PATH:-/opt/listinglive/config/ai_provider.toml}:/run/listinglive/ai_provider.toml:ro
       - ${APP_CONFIG_ROOT:-/opt/listinglive/config}:/run/listinglive/config:ro
@@ -93,6 +107,7 @@ services:
     env_file:
       - ${APP_ENV_FILE:-/opt/listinglive/config/.env.prod}
     environment:
+      TZ: ${CONTAINER_TIMEZONE:-UTC}
       STORAGE_LOCAL_ROOT: /data/storage
       AI_PROVIDER_CONFIG_PATH: /run/listinglive/ai_provider.toml
     command: celery -A backend.tasks.celery_app worker -l info -Q celery,video-standard,video-flex
@@ -104,6 +119,7 @@ services:
       api:
         condition: service_started
     volumes:
+      - /etc/localtime:/etc/localtime:ro
       - ${APP_STORAGE_ROOT:-/opt/listinglive/data/storage}:/data/storage
       - ${AI_PROVIDER_TOML_PATH:-/opt/listinglive/config/ai_provider.toml}:/run/listinglive/ai_provider.toml:ro
 
@@ -115,6 +131,7 @@ services:
     env_file:
       - ${APP_ENV_FILE:-/opt/listinglive/config/.env.prod}
     environment:
+      TZ: ${CONTAINER_TIMEZONE:-UTC}
       STORAGE_LOCAL_ROOT: /data/storage
       AI_PROVIDER_CONFIG_PATH: /run/listinglive/ai_provider.toml
     command: celery -A backend.tasks.celery_app beat -l info
@@ -126,6 +143,7 @@ services:
       api:
         condition: service_started
     volumes:
+      - /etc/localtime:/etc/localtime:ro
       - ${APP_STORAGE_ROOT:-/opt/listinglive/data/storage}:/data/storage
       - ${AI_PROVIDER_TOML_PATH:-/opt/listinglive/config/ai_provider.toml}:/run/listinglive/ai_provider.toml:ro
 

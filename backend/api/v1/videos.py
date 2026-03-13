@@ -4,7 +4,7 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,9 +15,13 @@ from backend.models.user import User
 from backend.schemas.video import (
     CreateLongVideoTaskRequest,
     CreateShortVideoTaskRequest,
+    ProfileCardOut,
     SceneTemplateOut,
     UploadFileResponse,
+    UploadAvatarResponse,
     UploadLogoResponse,
+    UpsertProfileCardRequest,
+    UserAvatarOut,
     UserLogoOut,
     VideoTaskListItem,
     VideoTaskOut,
@@ -28,19 +32,30 @@ from backend.services.video_service import (
     create_long_video_task,
     create_short_video_task,
     cleanup_storage_keys_best_effort,
+    delete_avatar_asset,
     delete_logo_asset,
+    delete_profile_card,
     enqueue_video_task_or_fail,
+    generate_profile_card_preview_png_from_request,
+    generate_profile_card_preview_png,
+    get_user_avatar_asset,
+    get_user_logo_asset,
     get_video_task_for_user,
     list_long_segments_for_task_ids,
+    list_profile_cards,
     list_scene_templates,
+    list_user_avatars,
     list_user_logos,
     list_video_tasks_for_user,
-    retry_long_video_task,
+    retry_video_task,
     save_image_upload,
+    set_default_avatar,
     set_default_logo,
     to_video_task_list_item,
     to_video_task_out,
+    upload_avatar_asset,
     upload_logo_asset,
+    upsert_profile_card,
 )
 from backend.tasks.video import (
     process_long_video_task_job,
@@ -49,6 +64,13 @@ from backend.tasks.video import (
 )
 
 router = APIRouter()
+
+
+def error_detail(code: str, message: str | None = None) -> dict:
+    detail = {"code": code}
+    if message:
+        detail["message"] = message
+    return detail
 
 
 @router.get("/scene-templates", response_model=list[SceneTemplateOut])
@@ -68,6 +90,14 @@ async def get_user_logos(
     return await list_user_logos(db, user.id)
 
 
+@router.get("/avatars", response_model=list[UserAvatarOut])
+async def get_user_avatars(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[UserAvatarOut]:
+    return await list_user_avatars(db, user.id)
+
+
 @router.post("/uploads/image", response_model=UploadFileResponse)
 async def upload_image(
     file: UploadFile = File(...),
@@ -81,7 +111,7 @@ async def upload_image(
     except AppError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=error_detail("videos.validation.invalidState", str(exc)))
 
 
 @router.post("/uploads/logo", response_model=UploadLogoResponse)
@@ -96,7 +126,22 @@ async def upload_logo(
     except AppError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=error_detail("videos.validation.invalidState", str(exc)))
+
+
+@router.post("/uploads/avatar", response_model=UploadAvatarResponse)
+async def upload_avatar(
+    file: UploadFile = File(...),
+    name: str | None = Form(default=None),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UploadAvatarResponse:
+    try:
+        return await upload_avatar_asset(db, user.id, file, name)
+    except AppError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=error_detail("videos.validation.invalidState", str(exc)))
 
 
 @router.delete("/logos/{logo_id}")
@@ -111,7 +156,52 @@ async def delete_logo(
     except AppError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(status_code=404, detail=error_detail("videos.resource.notFound", str(exc)))
+
+
+@router.delete("/avatars/{avatar_id}")
+async def delete_avatar(
+    avatar_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    try:
+        await delete_avatar_asset(db, user.id, avatar_id)
+        return {"message": "ok"}
+    except AppError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=error_detail("videos.resource.notFound", str(exc)))
+
+
+@router.get("/avatars/{avatar_id}/preview")
+async def preview_avatar(
+    avatar_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    avatar = await get_user_avatar_asset(db, user.id, avatar_id)
+    if avatar is None:
+        raise HTTPException(status_code=404, detail={"code": "videos.avatar.notFound"})
+    path = get_local_path(avatar.key)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail={"code": "videos.avatar.missing"})
+    return FileResponse(path, media_type="image/png", filename=f"avatar-{avatar_id}.png")
+
+
+@router.get("/logos/{logo_id}/preview")
+async def preview_logo(
+    logo_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    logo = await get_user_logo_asset(db, user.id, logo_id)
+    if logo is None:
+        raise HTTPException(status_code=404, detail={"code": "videos.logo.notFound"})
+    path = get_local_path(logo.key)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail={"code": "videos.logo.missing"})
+    return FileResponse(path, media_type="image/png", filename=f"logo-{logo_id}.png")
 
 
 @router.post("/logos/{logo_id}/default", response_model=UserLogoOut)
@@ -125,7 +215,101 @@ async def set_logo_as_default(
     except AppError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(status_code=404, detail=error_detail("videos.resource.notFound", str(exc)))
+
+
+@router.post("/avatars/{avatar_id}/default", response_model=UserAvatarOut)
+async def set_avatar_as_default(
+    avatar_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UserAvatarOut:
+    try:
+        return await set_default_avatar(db, user.id, avatar_id)
+    except AppError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=error_detail("videos.resource.notFound", str(exc)))
+
+
+@router.get("/profile-cards", response_model=list[ProfileCardOut])
+async def get_profile_cards(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[ProfileCardOut]:
+    return await list_profile_cards(db, user.id)
+
+
+@router.post("/profile-cards", response_model=ProfileCardOut)
+async def create_profile_card(
+    body: UpsertProfileCardRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ProfileCardOut:
+    try:
+        return await upsert_profile_card(db, user.id, body)
+    except AppError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+
+
+@router.patch("/profile-cards/{profile_card_id}", response_model=ProfileCardOut)
+async def update_profile_card(
+    profile_card_id: UUID,
+    body: UpsertProfileCardRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> ProfileCardOut:
+    try:
+        return await upsert_profile_card(db, user.id, body, profile_card_id=profile_card_id)
+    except AppError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+
+
+@router.delete("/profile-cards/{profile_card_id}")
+async def remove_profile_card(
+    profile_card_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    try:
+        await delete_profile_card(db, user.id, profile_card_id)
+        return {"message": "ok"}
+    except AppError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+
+
+@router.get("/profile-cards/{profile_card_id}/preview")
+async def preview_profile_card(
+    profile_card_id: UUID,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    try:
+        png_bytes = await generate_profile_card_preview_png(
+            db,
+            user_id=user.id,
+            profile_card_id=profile_card_id,
+        )
+        return Response(content=png_bytes, media_type="image/png")
+    except AppError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+
+
+@router.post("/profile-cards/preview")
+async def preview_profile_card_draft(
+    body: UpsertProfileCardRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> Response:
+    try:
+        png_bytes = await generate_profile_card_preview_png_from_request(
+            db,
+            user_id=user.id,
+            body=body,
+        )
+        return Response(content=png_bytes, media_type="image/png")
+    except AppError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
 
 
 @router.post("/tasks/short", response_model=VideoTaskOut)
@@ -144,6 +328,14 @@ async def create_short_task(
             aspect_ratio=body.aspect_ratio,
             duration_seconds=body.duration_seconds,
             logo_key=body.logo_key,
+            logo_position_x=body.logo_position_x,
+            logo_position_y=body.logo_position_y,
+            avatar_key=body.avatar_key,
+            avatar_position=body.avatar_position,
+            avatar_position_x=body.avatar_position_x,
+            avatar_position_y=body.avatar_position_y,
+            profile_card_id=body.profile_card_id,
+            profile_card_options=body.profile_card_options,
             service_tier=body.service_tier,
         )
         await db.commit()
@@ -156,7 +348,7 @@ async def create_short_task(
     except AppError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=error_detail("videos.validation.invalidState", str(exc)))
 
 
 @router.post("/tasks/merge", response_model=VideoTaskOut)
@@ -175,6 +367,14 @@ async def create_long_task(
             aspect_ratio=body.aspect_ratio,
             duration_seconds=body.duration_seconds,
             logo_key=body.logo_key,
+            logo_position_x=body.logo_position_x,
+            logo_position_y=body.logo_position_y,
+            avatar_key=body.avatar_key,
+            avatar_position=body.avatar_position,
+            avatar_position_x=body.avatar_position_x,
+            avatar_position_y=body.avatar_position_y,
+            profile_card_id=body.profile_card_id,
+            profile_card_options=body.profile_card_options,
             segments=body.segments,
             service_tier=body.service_tier,
         )
@@ -187,7 +387,7 @@ async def create_long_task(
     except AppError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=error_detail("videos.validation.invalidState", str(exc)))
 
 
 @router.get("/tasks", response_model=list[VideoTaskListItem])
@@ -212,7 +412,7 @@ async def get_task(
 ) -> VideoTaskOut:
     task = await get_video_task_for_user(db, user.id, task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+        raise HTTPException(status_code=404, detail=error_detail("videos.task.notFound"))
     segments_by_task_id = await list_long_segments_for_task_ids(db, [task.id] if task.task_type == "long" else [])
     return to_video_task_out(task, long_segments=segments_by_task_id.get(task.id))
 
@@ -224,17 +424,20 @@ async def retry_task(
     db: AsyncSession = Depends(get_db),
 ) -> VideoTaskOut:
     try:
-        task, cleanup_keys = await retry_long_video_task(db, user_id=user.id, task_id=task_id)
+        task, cleanup_keys = await retry_video_task(db, user_id=user.id, task_id=task_id)
         await db.commit()
         await db.refresh(task)
         await cleanup_storage_keys_best_effort(cleanup_keys)
-        await enqueue_video_task_or_fail(db, task=task, enqueue_fn=process_long_video_task_job.delay)
+        enqueue_fn = process_long_video_task_job.delay
+        if task.task_type == "short":
+            enqueue_fn = submit_flex_short_video_task_job.delay if task.service_tier == "flex" else process_short_video_task_job.delay
+        await enqueue_video_task_or_fail(db, task=task, enqueue_fn=enqueue_fn)
         segments_by_task_id = await list_long_segments_for_task_ids(db, [task.id])
         return to_video_task_out(task, long_segments=segments_by_task_id.get(task.id))
     except AppError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(status_code=404, detail=error_detail("videos.task.notFound", str(exc)))
 
 
 @router.get("/tasks/{task_id}/download")
@@ -245,14 +448,14 @@ async def download_task_video(
 ):
     task = await get_video_task_for_user(db, user.id, task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="任务不存在")
+        raise HTTPException(status_code=404, detail=error_detail("videos.task.notFound"))
     if task.video_key is None or task.status != "succeeded":
-        raise HTTPException(status_code=400, detail="视频尚未生成完成")
+        raise HTTPException(status_code=400, detail=error_detail("videos.task.notReady"))
     if task.expires_at and task.expires_at < datetime.now(timezone.utc):
-        raise HTTPException(status_code=410, detail="视频已过期")
+        raise HTTPException(status_code=410, detail=error_detail("videos.task.expired"))
 
     path = get_local_path(task.video_key)
     if not path.exists():
-        raise HTTPException(status_code=404, detail="视频文件不存在")
+        raise HTTPException(status_code=404, detail=error_detail("videos.storage.fileMissing"))
 
     return FileResponse(path, media_type="video/mp4", filename=f"listinglive-{task_id}.mp4")

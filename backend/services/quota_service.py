@@ -2,7 +2,7 @@
 套餐与配额服务
 """
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy import case, func, select
@@ -17,6 +17,9 @@ SIGNUP_BONUS_QUOTA = 5
 INVITE_BONUS_PACKAGE_TYPE = "invite_bonus"
 INVITE_BONUS_QUOTA = 15
 ACTIVE_SUBSCRIPTION_STATUSES = ("active", "trialing", "past_due")
+LOCAL_SIGNUP_TRIAL_PLAN_TYPE = "pro"
+LOCAL_SIGNUP_TRIAL_STATUS = "trialing"
+LOCAL_SIGNUP_TRIAL_DAYS = 7
 TASK_CHARGE_STATUS_PENDING = "pending"
 TASK_CHARGE_STATUS_CHARGED = "charged"
 TASK_CHARGE_STATUS_SKIPPED = "skipped"
@@ -88,11 +91,24 @@ async def list_active_quota_package_plans(db: AsyncSession) -> list[QuotaPackage
     return list((await db.execute(stmt)).scalars().all())
 
 
+def is_billing_managed_subscription(subscription: Subscription | None) -> bool:
+    return bool(getattr(subscription, "stripe_subscription_id", None))
+
+
+def is_local_trial_subscription(subscription: Subscription | None) -> bool:
+    return bool(
+        subscription is not None
+        and getattr(subscription, "status", None) == LOCAL_SIGNUP_TRIAL_STATUS
+        and not is_billing_managed_subscription(subscription)
+    )
+
+
 def pick_current_subscription(subscriptions: list[Subscription], *, now: datetime | None = None) -> Subscription | None:
     current_time = now or datetime.now(timezone.utc)
     ordered = sorted(
         subscriptions,
         key=lambda sub: (
+            is_billing_managed_subscription(sub),
             sub.current_period_start or MIN_DATETIME_UTC,
             sub.current_period_end or MAX_DATETIME_UTC,
             sub.created_at or MIN_DATETIME_UTC,
@@ -112,6 +128,56 @@ async def get_active_subscription(db: AsyncSession, user_id: UUID) -> Subscripti
     )
     subs = list((await db.execute(stmt)).scalars().all())
     return pick_current_subscription(subs)
+
+
+async def get_active_billing_subscription(db: AsyncSession, user_id: UUID) -> Subscription | None:
+    stmt = select(Subscription).where(
+        Subscription.user_id == user_id,
+        Subscription.status.in_(ACTIVE_SUBSCRIPTION_STATUSES),
+        Subscription.stripe_subscription_id.is_not(None),
+    )
+    subs = list((await db.execute(stmt)).scalars().all())
+    return pick_current_subscription(subs)
+
+
+async def ensure_signup_pro_trial_subscription(db: AsyncSession, user_id: UUID) -> Subscription:
+    existing_stmt = select(Subscription).where(
+        Subscription.user_id == user_id,
+        Subscription.status == LOCAL_SIGNUP_TRIAL_STATUS,
+        Subscription.stripe_subscription_id.is_(None),
+    )
+    existing = (await db.execute(existing_stmt)).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    now = datetime.now(timezone.utc)
+    plan_stmt = select(SubscriptionPlan).where(
+        SubscriptionPlan.plan_type == LOCAL_SIGNUP_TRIAL_PLAN_TYPE,
+        SubscriptionPlan.is_active.is_(True),
+    )
+    plan = (await db.execute(plan_stmt)).scalar_one_or_none()
+
+    subscription = Subscription(
+        user_id=user_id,
+        subscription_plan_id=plan.id if plan is not None else None,
+        plan_type=LOCAL_SIGNUP_TRIAL_PLAN_TYPE,
+        status=LOCAL_SIGNUP_TRIAL_STATUS,
+        quota_per_month=0,
+        quota_used=0,
+        storage_days=plan.storage_days if plan is not None else 0,
+        stripe_subscription_id=None,
+        stripe_customer_id=None,
+        stripe_price_id=None,
+        cancel_at_period_end=False,
+        canceled_at=None,
+        latest_invoice_id=None,
+        last_stripe_event_id=None,
+        current_period_start=now,
+        current_period_end=now + timedelta(days=LOCAL_SIGNUP_TRIAL_DAYS),
+    )
+    db.add(subscription)
+    await db.flush()
+    return subscription
 
 
 async def get_quota_snapshot(db: AsyncSession, user_id: UUID) -> dict:
@@ -144,6 +210,8 @@ async def get_quota_snapshot(db: AsyncSession, user_id: UUID) -> dict:
 
     return {
         "subscription": subscription,
+        "subscription_is_local_trial": is_local_trial_subscription(subscription),
+        "subscription_is_billing_managed": is_billing_managed_subscription(subscription),
         "subscription_remaining": subscription_remaining,
         "package_remaining": package_remaining,
         "paid_package_remaining": paid_package_remaining,

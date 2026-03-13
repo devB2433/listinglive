@@ -64,6 +64,8 @@ def build_access_context_from_snapshot(snapshot: dict) -> AccessContext:
         access_tier=access_tier,
         subscription_plan_type=subscription.plan_type if subscription is not None else None,
         subscription_status=getattr(subscription, "status", None) if subscription is not None else None,
+        subscription_is_local_trial=snapshot.get("subscription_is_local_trial", False),
+        subscription_is_billing_managed=snapshot.get("subscription_is_billing_managed", False),
         subscription_cancel_at_period_end=getattr(subscription, "cancel_at_period_end", False)
         if subscription is not None
         else False,

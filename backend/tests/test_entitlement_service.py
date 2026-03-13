@@ -25,6 +25,7 @@ class EntitlementServiceTests(unittest.TestCase):
         self.assertFalse(context.limits.short_duration_editable)
         self.assertFalse(has_capability(context, "merge_per_image_template"))
         self.assertFalse(has_capability(context, "transition_effect"))
+        self.assertFalse(has_capability(context, "logo_position_customize"))
         self.assertEqual(context.limits.allowed_resolutions, ("1080p",))
 
     def test_basic_subscription_keeps_fixed_short_duration(self) -> None:
@@ -66,6 +67,7 @@ class EntitlementServiceTests(unittest.TestCase):
         self.assertTrue(has_capability(context, "merge_per_segment_duration"))
         self.assertTrue(has_capability(context, "merge_drag_reorder"))
         self.assertTrue(has_capability(context, "transition_effect"))
+        self.assertTrue(has_capability(context, "logo_position_customize"))
         self.assertTrue(context.can_purchase_quota_package)
         self.assertTrue(context.limits.short_duration_editable)
         self.assertEqual(context.limits.allowed_resolutions, ("1080p",))
@@ -120,6 +122,26 @@ class EntitlementServiceTests(unittest.TestCase):
 
         self.assertEqual(context.access_tier, "signup_bonus")
         self.assertEqual(context.invite_bonus_remaining, 15)
+        self.assertTrue(has_capability(context, "short_video_create"))
+        self.assertFalse(has_capability(context, "merge_per_image_template"))
+        self.assertFalse(context.limits.short_duration_editable)
+
+    def test_expired_local_trial_without_formal_subscription_returns_free_signup_bonus_state(self) -> None:
+        context = build_access_context_from_snapshot(
+            {
+                "subscription": None,
+                "subscription_remaining": 0,
+                "package_remaining": 20,
+                "paid_package_remaining": 0,
+                "signup_bonus_remaining": 5,
+                "invite_bonus_remaining": 15,
+                "total_available": 20,
+            }
+        )
+
+        self.assertEqual(context.access_tier, "signup_bonus")
+        self.assertIsNone(context.subscription_plan_type)
+        self.assertIsNone(context.subscription_status)
         self.assertTrue(has_capability(context, "short_video_create"))
         self.assertFalse(has_capability(context, "merge_per_image_template"))
         self.assertFalse(context.limits.short_duration_editable)

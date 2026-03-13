@@ -46,6 +46,8 @@ class CapabilityLimitsOut(BaseModel):
 class QuotaSnapshotOut(BaseModel):
     subscription_plan_type: Optional[str]
     subscription_status: Optional[str] = None
+    subscription_is_local_trial: bool = False
+    subscription_is_billing_managed: bool = False
     subscription_cancel_at_period_end: bool = False
     subscription_current_period_end: Optional[datetime] = None
     subscription_remaining: int

@@ -63,7 +63,7 @@ export default function DashboardLayout({
 
 function HeaderWithSessionFallback({ onLogout }: { onLogout: () => void }) {
   const { quota } = useDashboardSession();
-  return <DashboardHeader onLogout={onLogout} accessTier={quota.access_tier} />;
+  return <DashboardHeader onLogout={onLogout} accessTier={quota.access_tier} totalAvailable={quota.total_available} />;
 }
 
 function LocaleSyncFromUser() {

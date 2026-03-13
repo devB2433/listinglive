@@ -135,6 +135,12 @@ if (-not (Test-Path 'frontend/.env.local')) {
   'NEXT_PUBLIC_API_URL=http://localhost:8003' | Set-Content 'frontend/.env.local'
 }
 
+# Clear Next.js dev build cache to avoid stale/missing server chunks after route switching.
+$frontendBuildDir = Join-Path $root 'frontend/.next'
+if (Test-Path $frontendBuildDir) {
+  Remove-Item $frontendBuildDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 # === Phase 4: Infrastructure ===
 $env:CONTAINER_TIMEZONE = Get-ContainerTimeZone
 docker-compose up -d postgres redis | Out-Null

@@ -154,9 +154,9 @@ async def create_subscription_checkout(db: AsyncSession, user: User, plan_id: UU
         raise AppError("billing.plan.notConfigured", status_code=400)
 
     context = await build_user_access_context(db, user.id)
-    if context.subscription_plan_type == plan.plan_type:
+    if context.subscription_plan_type == plan.plan_type and context.subscription_is_billing_managed:
         raise AppError("billing.subscription.alreadyActive", status_code=400)
-    if context.subscription_plan_type is not None:
+    if context.subscription_is_billing_managed:
         raise AppError("billing.subscription.manageExisting", status_code=400)
 
     customer_id = await get_or_create_customer_id(db, user)
@@ -191,6 +191,12 @@ async def create_quota_package_checkout(db: AsyncSession, user: User, package_pl
 
 
 async def create_portal_link(db: AsyncSession, user: User) -> str:
+    from backend.services.quota_service import get_active_billing_subscription
+
+    subscription = await get_active_billing_subscription(db, user.id)
+    if subscription is None:
+        raise AppError("billing.subscription.noActiveSubscription", status_code=400)
+
     customer_id = await get_or_create_customer_id(db, user)
     return create_customer_portal_session(customer_id=customer_id)
 
@@ -200,9 +206,9 @@ async def _get_validated_upgrade_target(
     user: User,
     target_plan_id: UUID,
 ) -> tuple[Subscription, SubscriptionPlan]:
-    from backend.services.quota_service import get_active_subscription
+    from backend.services.quota_service import get_active_billing_subscription
 
-    subscription = await get_active_subscription(db, user.id)
+    subscription = await get_active_billing_subscription(db, user.id)
     if subscription is None or not subscription.stripe_subscription_id:
         raise AppError("billing.subscription.noActiveSubscription", status_code=400)
 

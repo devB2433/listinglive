@@ -1,7 +1,9 @@
+import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
-from backend.services.billing_service import compute_subscription_quota_used
+from backend.services.billing_service import compute_subscription_quota_used, create_subscription_checkout
 
 
 def test_upgrade_within_same_cycle_keeps_used_quota() -> None:
@@ -61,3 +63,40 @@ def test_same_cycle_downgrade_caps_used_quota() -> None:
     )
 
     assert quota_used == 30
+
+
+class BillingCheckoutTests(unittest.IsolatedAsyncioTestCase):
+    async def test_create_subscription_checkout_allows_same_plan_when_current_access_is_local_trial(self) -> None:
+        db = AsyncMock()
+        user = SimpleNamespace(id="user-1")
+        plan = SimpleNamespace(
+            id="plan-1",
+            plan_type="pro",
+            stripe_price_id="price_pro",
+        )
+
+        with patch("backend.services.billing_service._get_plan_by_id", AsyncMock(return_value=plan)):
+            with patch(
+                "backend.services.billing_service.build_user_access_context",
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        subscription_plan_type="pro",
+                        subscription_is_billing_managed=False,
+                    )
+                ),
+            ):
+                with patch("backend.services.billing_service.get_or_create_customer_id", AsyncMock(return_value="cus_123")):
+                    with patch(
+                        "backend.services.billing_service.create_subscription_checkout_session",
+                        return_value="https://stripe.test/checkout",
+                    ) as create_session:
+                        checkout_url = await create_subscription_checkout(db, user, plan.id)
+
+        self.assertEqual(checkout_url, "https://stripe.test/checkout")
+        create_session.assert_called_once_with(
+            customer_id="cus_123",
+            price_id="price_pro",
+            user_id="user-1",
+            plan_id="plan-1",
+            plan_type="pro",
+        )

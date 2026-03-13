@@ -7,6 +7,7 @@ import { useLocale } from "@/components/providers/locale-provider";
 import {
   getMe,
   getQuota,
+  setUnauthorizedHandler,
   type QuotaSnapshot,
   type UserProfile,
 } from "@/lib/api";
@@ -16,6 +17,8 @@ import { warmVideoConfigCache } from "@/lib/video-config-cache";
 const EMPTY_QUOTA: QuotaSnapshot = {
   subscription_plan_type: null,
   subscription_status: null,
+  subscription_is_local_trial: false,
+  subscription_is_billing_managed: false,
   subscription_cancel_at_period_end: false,
   subscription_current_period_end: null,
   subscription_remaining: 0,
@@ -98,6 +101,11 @@ export function DashboardSessionProvider({ children }: Readonly<{ children: Reac
   useEffect(() => {
     void loadSession();
   }, [loadSession]);
+
+  useEffect(() => {
+    setUnauthorizedHandler(handleUnauthorized);
+    return () => setUnauthorizedHandler(null);
+  }, [handleUnauthorized]);
 
   const refreshQuota = useCallback(async () => {
     const token = getStoredAccessToken();

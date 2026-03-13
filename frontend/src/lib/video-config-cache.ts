@@ -1,8 +1,12 @@
 import {
+  getProfileCards,
   getSceneTemplates,
+  getUserAvatars,
   getUserLogos,
+  type ProfileCard,
   type SceneTemplate,
   type SceneTemplatePropertyType,
+  type UserAvatar,
   type UserLogo,
 } from "@/lib/api";
 
@@ -13,6 +17,10 @@ type TokenCacheEntry = {
   templatePromises: Record<string, Promise<SceneTemplate[]> | undefined>;
   logos?: UserLogo[];
   logosPromise?: Promise<UserLogo[]>;
+  avatars?: UserAvatar[];
+  avatarsPromise?: Promise<UserAvatar[]>;
+  profileCards?: ProfileCard[];
+  profileCardsPromise?: Promise<ProfileCard[]>;
 };
 
 const cacheByToken = new Map<string, TokenCacheEntry>();
@@ -76,6 +84,48 @@ export async function getCachedUserLogos(accessToken: string, options?: { force?
   return promise;
 }
 
+export async function getCachedUserAvatars(accessToken: string, options?: { force?: boolean }): Promise<UserAvatar[]> {
+  const entry = getEntry(accessToken);
+  if (!options?.force && entry.avatars) {
+    return entry.avatars;
+  }
+  if (!options?.force && entry.avatarsPromise) {
+    return entry.avatarsPromise;
+  }
+
+  const promise = getUserAvatars(accessToken)
+    .then((avatars) => {
+      entry.avatars = avatars;
+      return avatars;
+    })
+    .finally(() => {
+      entry.avatarsPromise = undefined;
+    });
+  entry.avatarsPromise = promise;
+  return promise;
+}
+
+export async function getCachedProfileCards(accessToken: string, options?: { force?: boolean }): Promise<ProfileCard[]> {
+  const entry = getEntry(accessToken);
+  if (!options?.force && entry.profileCards) {
+    return entry.profileCards;
+  }
+  if (!options?.force && entry.profileCardsPromise) {
+    return entry.profileCardsPromise;
+  }
+
+  const promise = getProfileCards(accessToken)
+    .then((cards) => {
+      entry.profileCards = cards;
+      return cards;
+    })
+    .finally(() => {
+      entry.profileCardsPromise = undefined;
+    });
+  entry.profileCardsPromise = promise;
+  return promise;
+}
+
 export function invalidateUserLogosCache(accessToken?: string) {
   if (!accessToken) {
     cacheByToken.clear();
@@ -85,6 +135,28 @@ export function invalidateUserLogosCache(accessToken?: string) {
   if (!entry) return;
   entry.logos = undefined;
   entry.logosPromise = undefined;
+}
+
+export function invalidateUserAvatarsCache(accessToken?: string) {
+  if (!accessToken) {
+    cacheByToken.clear();
+    return;
+  }
+  const entry = cacheByToken.get(accessToken);
+  if (!entry) return;
+  entry.avatars = undefined;
+  entry.avatarsPromise = undefined;
+}
+
+export function invalidateProfileCardsCache(accessToken?: string) {
+  if (!accessToken) {
+    cacheByToken.clear();
+    return;
+  }
+  const entry = cacheByToken.get(accessToken);
+  if (!entry) return;
+  entry.profileCards = undefined;
+  entry.profileCardsPromise = undefined;
 }
 
 export function invalidateVideoConfigCache(accessToken?: string) {
@@ -100,5 +172,7 @@ export async function warmVideoConfigCache(accessToken: string): Promise<void> {
     getCachedSceneTemplates(accessToken, "short", { propertyType: "standard_home" }),
     getCachedSceneTemplates(accessToken, "long_unified", { propertyType: "standard_home" }),
     getCachedUserLogos(accessToken),
+    getCachedUserAvatars(accessToken),
+    getCachedProfileCards(accessToken),
   ]);
 }

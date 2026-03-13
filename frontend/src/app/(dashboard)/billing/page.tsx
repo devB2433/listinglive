@@ -83,6 +83,8 @@ export default function BillingPage() {
   }
 
   const hasSubscription = Boolean(quota.subscription_plan_type);
+  const hasBillingManagedSubscription = quota.subscription_is_billing_managed;
+  const isLocalTrial = quota.subscription_is_local_trial;
   const PLAN_TIER_ORDER: Record<string, number> = { basic: 1, pro: 2, ultimate: 3 };
   const currentTier = PLAN_TIER_ORDER[quota.subscription_plan_type ?? ""] ?? 0;
 
@@ -213,6 +215,13 @@ export default function BillingPage() {
                 <p>{translate("dashboard.billing.inviteBonusDescription", { count: quota.invite_bonus_remaining })}</p>
               </div>
             )}
+            {isLocalTrial && quota.subscription_current_period_end && (
+              <p className="mt-1 text-sm text-blue-700">
+                {translate("dashboard.billing.localTrialEnds", {
+                  value: formatDate(quota.subscription_current_period_end),
+                })}
+              </p>
+            )}
             {hasSubscription && (
               <>
                 {quota.subscription_cancel_at_period_end && (
@@ -229,7 +238,7 @@ export default function BillingPage() {
             )}
           </div>
           <div className="flex flex-wrap gap-2">
-            {hasSubscription && (() => {
+            {hasBillingManagedSubscription && (() => {
               const higherPlans = subscriptionPlans
                 .filter((p) => (PLAN_TIER_ORDER[p.plan_type] ?? 0) > currentTier)
                 .sort((a, b) => (PLAN_TIER_ORDER[a.plan_type] ?? 0) - (PLAN_TIER_ORDER[b.plan_type] ?? 0));
@@ -249,7 +258,7 @@ export default function BillingPage() {
                 </button>
               ) : null;
             })()}
-            {hasSubscription && (
+            {hasBillingManagedSubscription && (
               <button
                 type="button"
                 onClick={() => void openCustomerPortal("portal:status")}
@@ -284,12 +293,12 @@ export default function BillingPage() {
               {subscriptionPlans.map((plan) => {
                 const isCurrent = quota.subscription_plan_type === plan.plan_type;
                 const planTier = PLAN_TIER_ORDER[plan.plan_type] ?? 0;
-                const isUpgrade = hasSubscription && !isCurrent && planTier > currentTier;
-                const isDowngrade = hasSubscription && !isCurrent && planTier < currentTier;
+                const isUpgrade = hasBillingManagedSubscription && !isCurrent && planTier > currentTier;
+                const isDowngrade = hasBillingManagedSubscription && !isCurrent && planTier < currentTier;
 
                 let buttonLabel: string;
                 let actionKey: string;
-                if (isCurrent) {
+                if (isCurrent && hasBillingManagedSubscription) {
                   buttonLabel = translate("dashboard.billing.manageAction");
                   actionKey = `plan:${plan.id}`;
                 } else if (isUpgrade) {
@@ -297,7 +306,7 @@ export default function BillingPage() {
                     plan: getPlanDisplayName(translate, plan.plan_type, plan.name),
                   });
                   actionKey = `upgrade:${plan.id}`;
-                } else if (!hasSubscription) {
+                } else if (!hasBillingManagedSubscription) {
                   buttonLabel = translate("dashboard.billing.subscribeAction");
                   actionKey = `plan:${plan.id}`;
                 } else {
@@ -316,7 +325,7 @@ export default function BillingPage() {
                       </p>
                       {isCurrent && (
                         <span className="rounded-full bg-blue-600 px-2 py-0.5 text-xs text-white">
-                          {translate("dashboard.billing.currentSubscription")}
+                          {isLocalTrial ? translate("dashboard.billing.localTrialBadge") : translate("dashboard.billing.currentSubscription")}
                         </span>
                       )}
                     </div>

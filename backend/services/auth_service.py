@@ -132,10 +132,15 @@ async def register(
     db.add(user)
     await db.flush()
 
-    from backend.services.quota_service import ensure_invite_bonus, ensure_signup_bonus
+    from backend.services.quota_service import (
+        ensure_invite_bonus,
+        ensure_signup_bonus,
+        ensure_signup_pro_trial_subscription,
+    )
 
     await ensure_signup_bonus(db, user.id)
     await ensure_invite_bonus(db, user.id)
+    await ensure_signup_pro_trial_subscription(db, user.id)
     await mark_invite_code_used(db, valid_invite_code, used_by_user_id=user.id)
     return user
 

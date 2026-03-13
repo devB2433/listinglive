@@ -4,7 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useState } 
 import { useRouter } from "next/navigation";
 
 import { useLocale } from "@/components/providers/locale-provider";
-import { getMe, type UserProfile } from "@/lib/api";
+import { getMe, setUnauthorizedHandler, type UserProfile } from "@/lib/api";
 import { clearStoredTokens, getStoredAccessToken } from "@/lib/session";
 
 type AdminSessionContextValue = {
@@ -63,6 +63,11 @@ export function AdminSessionProvider({ children }: Readonly<{ children: React.Re
     clearStoredTokens();
     router.replace("/admin/login");
   }, [router]);
+
+  useEffect(() => {
+    setUnauthorizedHandler(logout);
+    return () => setUnauthorizedHandler(null);
+  }, [logout]);
 
   const value = useMemo<AdminSessionContextValue | null>(() => {
     if (!user || !accessToken) return null;

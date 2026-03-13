@@ -16,6 +16,9 @@ CAPABILITY_SCENE_TEMPLATE_SELECT = "scene_template_select"
 CAPABILITY_RESOLUTION_SELECT = "resolution_select"
 CAPABILITY_ASPECT_RATIO_SELECT = "aspect_ratio_select"
 CAPABILITY_LOGO_WATERMARK = "logo_watermark"
+CAPABILITY_LOGO_POSITION_CUSTOMIZE = "logo_position_customize"
+CAPABILITY_AVATAR_OVERLAY = "avatar_overlay"
+CAPABILITY_ENDING_PROFILE_CARD = "ending_profile_card"
 CAPABILITY_TRANSITION_EFFECT = "transition_effect"
 CAPABILITY_MERGE_PER_IMAGE_TEMPLATE = "merge_per_image_template"
 CAPABILITY_MERGE_PER_SEGMENT_DURATION = "merge_per_segment_duration"
@@ -51,6 +54,9 @@ BASIC_FEATURE_CAPABILITIES = frozenset(
 
 ADVANCED_FEATURE_CAPABILITIES = frozenset(
     {
+        CAPABILITY_LOGO_POSITION_CUSTOMIZE,
+        CAPABILITY_AVATAR_OVERLAY,
+        CAPABILITY_ENDING_PROFILE_CARD,
         CAPABILITY_TRANSITION_EFFECT,
         CAPABILITY_MERGE_PER_IMAGE_TEMPLATE,
         CAPABILITY_MERGE_PER_SEGMENT_DURATION,
@@ -79,6 +85,8 @@ class AccessContext:
     access_tier: str
     subscription_plan_type: str | None
     subscription_status: str | None
+    subscription_is_local_trial: bool
+    subscription_is_billing_managed: bool
     subscription_cancel_at_period_end: bool
     subscription_current_period_end: datetime | None
     subscription_remaining: int

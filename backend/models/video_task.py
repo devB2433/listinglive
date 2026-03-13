@@ -4,7 +4,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -31,6 +31,19 @@ class VideoTask(Base):
     aspect_ratio: Mapped[str] = mapped_column(String(32), nullable=False)
     duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     logo_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    logo_position_x: Mapped[float | None] = mapped_column(Float, nullable=True)
+    logo_position_y: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avatar_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    avatar_position: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    avatar_position_x: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avatar_position_y: Mapped[float | None] = mapped_column(Float, nullable=True)
+    profile_card_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("profile_cards.id"),
+        nullable=True,
+        index=True,
+    )
+    profile_card_data: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     quota_consumed: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     planned_quota_consumed: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     charged_quota_consumed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -45,6 +58,10 @@ class VideoTask(Base):
     provider_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     next_poll_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     video_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_source: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_retryable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     queued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

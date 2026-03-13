@@ -17,8 +17,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from backend.core.config import settings
 from backend.core.database import Base
 from backend.models import (  # noqa: F401 - 让 Alembic 发现表
+    AvatarAsset,
     LogoAsset,
     LongVideoSegment,
+    ProfileCard,
     QuotaPackage,
     QuotaPackagePlan,
     SceneTemplate,

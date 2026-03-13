@@ -6,6 +6,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocale } from "@/components/providers/locale-provider";
 import { useDashboardSession } from "@/components/providers/session-provider";
 import {
+  ApiError,
+  UnauthorizedError,
   createLongVideoTask,
   createShortVideoTask,
   downloadVideoTask,
@@ -15,8 +17,8 @@ import {
   type LongVideoSegmentStatus,
   type VideoTask,
 } from "@/lib/api";
-import { t, translateApiError, type Locale } from "@/lib/locale";
-import { deletePendingVideoDraft, getPendingVideoDraft, type PendingVideoDraft } from "@/lib/pending-video-task";
+import { InfoTooltip } from "@/components/ui/field-help";
+import { deletePendingVideoDraft, getPendingVideoDraft, savePendingVideoDraft, type PendingVideoDraft, type StoredPendingVideoDraft } from "@/lib/pending-video-task";
 
 type UserFacingTaskStatus = "uploading" | "queued" | "creating" | "post_processing" | "completed" | "failed";
 type TaskFilter = "all" | UserFacingTaskStatus;
@@ -33,29 +35,34 @@ type PendingTaskView = {
   planned_quota_consumed: number;
   charged_quota_consumed: number;
   created_at: string;
+  error_code?: string;
+  error_detail?: string;
+  error_retryable?: boolean | null;
   error_message?: string;
 };
 type TaskListEntry = { kind: "pending"; task: PendingTaskView } | { kind: "task"; task: VideoTask };
 
 export default function VideoTasksPage() {
   const { accessToken, refreshQuota } = useDashboardSession();
-  const { formatDate, locale, translate } = useLocale();
+  const { translate } = useLocale();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const initialDraftId = searchParams.get("draft");
   const [tasks, setTasks] = useState<VideoTask[]>([]);
-  const [pendingTasks, setPendingTasks] = useState<PendingTaskView[]>(() => {
-    if (!initialDraftId) return [];
-    const draft = getPendingVideoDraft(initialDraftId);
-    return draft ? [buildPendingTaskView(draft)] : [];
-  });
+  const [pendingTasks, setPendingTasks] = useState<PendingTaskView[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [filter, setFilter] = useState<TaskFilter>("all");
   const [taskTypeFilter, setTaskTypeFilter] = useState<TaskTypeFilter>("all");
   const [downloadingTaskId, setDownloadingTaskId] = useState("");
   const [retryingTaskId, setRetryingTaskId] = useState("");
+  const [cancellingPendingTaskId, setCancellingPendingTaskId] = useState("");
   const startedDraftIdsRef = useRef<Set<string>>(new Set());
+  const pendingSubmitControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const draftIdFromQuery = searchParams.get("draft");
+
+  const isAbortError = useCallback((error: unknown) => {
+    return error instanceof DOMException && error.name === "AbortError";
+  }, []);
 
   const hasRunningTask = useMemo(
     () =>
@@ -86,11 +93,23 @@ export default function VideoTasksPage() {
     }
   }, [accessToken, refreshQuota, taskTypeFilter]);
 
-  const submitPendingDraft = useCallback(async (draft: PendingVideoDraft) => {
+  const submitPendingDraft = useCallback(async (draft: StoredPendingVideoDraft) => {
+    console.info("[draft-debug]", "pending_submit_started", {
+      draftId: draft.id,
+      status: draft.status,
+      taskType: draft.task_type,
+    });
+    const controller = new AbortController();
+    pendingSubmitControllersRef.current.set(draft.id, controller);
     try {
+      await savePendingVideoDraft({ ...draft, status: "submitting" });
       let task: VideoTask;
       if (draft.task_type === "short") {
-        const imageUpload = await uploadVideoAsset(accessToken, draft.image_file, "image");
+        const imageUpload = await uploadVideoAsset(accessToken, draft.image_file, "image", { signal: controller.signal });
+        console.info("[draft-debug]", "pending_submit_short_upload_done", {
+          draftId: draft.id,
+          imageKey: imageUpload.key,
+        });
         task = await createShortVideoTask(accessToken, {
           image_key: imageUpload.key,
           scene_template_id: draft.scene_template_id,
@@ -98,10 +117,26 @@ export default function VideoTasksPage() {
           aspect_ratio: draft.aspect_ratio,
           duration_seconds: draft.duration_seconds,
           logo_key: draft.logo_key ?? null,
+          logo_position_x: draft.logo_placement?.x ?? null,
+          logo_position_y: draft.logo_placement?.y ?? null,
+          avatar_key: draft.avatar_key ?? null,
+          avatar_position: draft.avatar_position ?? null,
+          avatar_position_x: draft.avatar_placement?.x ?? null,
+          avatar_position_y: draft.avatar_placement?.y ?? null,
+          profile_card_id: draft.profile_card_id ?? null,
+          profile_card_options: draft.profile_card_options ?? null,
           service_tier: draft.service_tier,
+        }, { signal: controller.signal });
+        console.info("[draft-debug]", "pending_submit_short_task_created", {
+          draftId: draft.id,
+          taskId: task.id,
         });
       } else {
-        const uploads = await Promise.all(draft.segments.map((segment) => uploadVideoAsset(accessToken, segment.file, "image")));
+        const uploads = await Promise.all(draft.segments.map((segment) => uploadVideoAsset(accessToken, segment.file, "image", { signal: controller.signal })));
+        console.info("[draft-debug]", "pending_submit_long_uploads_done", {
+          draftId: draft.id,
+          uploadCount: uploads.length,
+        });
         const uploadedKeysBySegmentId = new Map(draft.segments.map((segment, index) => [segment.id, uploads[index].key]));
         const originalOrderedImageKeys = [...draft.segments]
           .sort((left, right) => left.source_index - right.source_index)
@@ -111,13 +146,21 @@ export default function VideoTasksPage() {
             ? draft.segments
             : [...draft.segments].sort((left, right) => left.source_index - right.source_index);
         const firstSegment = orderedSegments[0];
-        task = await createLongVideoTask(accessToken, {
+        const longTaskPayload = {
           image_keys: originalOrderedImageKeys,
           scene_template_id: draft.edit_mode === "custom" ? firstSegment?.scene_template_id || draft.scene_template_id : draft.scene_template_id,
           resolution: draft.resolution,
           aspect_ratio: draft.aspect_ratio,
           duration_seconds: draft.edit_mode === "custom" ? firstSegment?.duration_seconds || draft.duration_seconds : draft.duration_seconds,
           logo_key: draft.logo_key ?? null,
+          logo_position_x: draft.logo_placement?.x ?? null,
+          logo_position_y: draft.logo_placement?.y ?? null,
+          avatar_key: draft.avatar_key ?? null,
+          avatar_position: draft.avatar_position ?? null,
+          avatar_position_x: draft.avatar_placement?.x ?? null,
+          avatar_position_y: draft.avatar_placement?.y ?? null,
+          profile_card_id: draft.profile_card_id ?? null,
+          profile_card_options: draft.profile_card_options ?? null,
           service_tier: draft.service_tier,
           segments:
             draft.edit_mode === "custom"
@@ -128,44 +171,123 @@ export default function VideoTasksPage() {
                   sort_order: index,
                 }))
               : null,
+        };
+        console.info("[draft-debug]", "pending_submit_long_payload", {
+          draftId: draft.id,
+          editMode: draft.edit_mode,
+          payload: longTaskPayload,
+        });
+        task = await createLongVideoTask(accessToken, longTaskPayload, { signal: controller.signal });
+        console.info("[draft-debug]", "pending_submit_long_task_created", {
+          draftId: draft.id,
+          taskId: task.id,
         });
       }
 
-      deletePendingVideoDraft(draft.id);
+      await deletePendingVideoDraft(draft.id);
       setPendingTasks((current) => current.filter((item) => item.id !== draft.id));
       setTasks((current) => [task, ...current.filter((item) => item.id !== task.id)]);
+      router.replace("/videos/tasks");
       await refreshQuota();
       await loadTasks(true);
     } catch (error) {
-      deletePendingVideoDraft(draft.id);
+      console.error("[draft-debug]", "pending_submit_failed", {
+        draftId: draft.id,
+        error,
+        apiError:
+          error instanceof ApiError
+            ? {
+                code: error.code ?? null,
+                status: error.status ?? null,
+                rawDetail: error.rawDetail ?? null,
+                message: error.message,
+              }
+            : null,
+      });
+      if (isAbortError(error)) {
+        console.info("[draft-debug]", "pending_submit_aborted", { draftId: draft.id });
+        await savePendingVideoDraft({ ...draft, status: "editing" });
+        setPendingTasks((current) => current.filter((item) => item.id !== draft.id));
+        return;
+      }
+      if (error instanceof UnauthorizedError) {
+        await savePendingVideoDraft({ ...draft, status: "auth_required" });
+        throw error;
+      }
+      await deletePendingVideoDraft(draft.id);
+      router.replace("/videos/tasks");
       setPendingTasks((current) =>
         current.map((item) =>
           item.id === draft.id
             ? {
                 ...item,
                 status: "failed",
+                error_code: error instanceof ApiError ? error.code : undefined,
+                error_detail: error instanceof ApiError && typeof error.rawDetail === "string" ? error.rawDetail : undefined,
+                error_retryable: true,
                 error_message: error instanceof Error ? error.message : translate("dashboard.tasks.failed"),
               }
             : item,
         ),
       );
+    } finally {
+      // Allow the same recovered draft ID to be submitted again later if the user
+      // returns to editing and retries the submission flow.
+      startedDraftIdsRef.current.delete(draft.id);
+      pendingSubmitControllersRef.current.delete(draft.id);
+      setCancellingPendingTaskId((current) => (current === draft.id ? "" : current));
     }
-  }, [accessToken, loadTasks, refreshQuota, translate]);
+  }, [accessToken, isAbortError, loadTasks, refreshQuota, router, translate]);
 
   useEffect(() => {
     void loadTasks(false);
   }, [loadTasks]);
 
   useEffect(() => {
-    const draftId = searchParams.get("draft");
-    if (!draftId || startedDraftIdsRef.current.has(draftId)) return;
-    const draft = getPendingVideoDraft(draftId);
-    if (!draft) return;
-    startedDraftIdsRef.current.add(draftId);
-    setPendingTasks((current) => (current.some((item) => item.id === draft.id) ? current : [buildPendingTaskView(draft), ...current]));
-    router.replace("/videos/tasks");
-    void submitPendingDraft(draft);
-  }, [router, searchParams, submitPendingDraft]);
+    if (!draftIdFromQuery) return;
+    const startedDraftIds = startedDraftIdsRef.current;
+    if (startedDraftIds.has(draftIdFromQuery)) {
+      console.info("[draft-debug]", "tasks_page_draft_skipped_duplicate", { draftId: draftIdFromQuery });
+      return;
+    }
+    console.info("[draft-debug]", "tasks_page_draft_detected", { draftId: draftIdFromQuery });
+    let cancelled = false;
+    startedDraftIds.add(draftIdFromQuery);
+    void getPendingVideoDraft(draftIdFromQuery)
+      .then((draft) => {
+        if (cancelled) {
+          console.info("[draft-debug]", "tasks_page_draft_load_cancelled", { draftId: draftIdFromQuery });
+          startedDraftIds.delete(draftIdFromQuery);
+          return;
+        }
+        if (!draft) {
+          console.warn("[draft-debug]", "tasks_page_draft_missing", { draftId: draftIdFromQuery });
+          startedDraftIds.delete(draftIdFromQuery);
+          router.replace("/videos/tasks");
+          return;
+        }
+        console.info("[draft-debug]", "tasks_page_draft_loaded", {
+          draftId: draft.id,
+          status: draft.status,
+          taskType: draft.task_type,
+        });
+        setPendingTasks((current) => (current.some((item) => item.id === draft.id) ? current : [buildPendingTaskView(draft), ...current]));
+        void submitPendingDraft(draft).catch(() => {
+          // Redirect and UI state are handled inside auth/api and submitPendingDraft.
+        });
+      })
+      .catch((error) => {
+        console.error("[draft-debug]", "tasks_page_draft_load_failed", {
+          draftId: draftIdFromQuery,
+          error,
+        });
+        startedDraftIds.delete(draftIdFromQuery);
+      });
+    return () => {
+      cancelled = true;
+      startedDraftIds.delete(draftIdFromQuery);
+    };
+  }, [draftIdFromQuery, router, submitPendingDraft]);
 
   useEffect(() => {
     if (!hasRunningTask) return;
@@ -212,6 +334,11 @@ export default function VideoTasksPage() {
     } finally {
       setRetryingTaskId("");
     }
+  }
+
+  function handleCancelPendingTask(taskId: string) {
+    setCancellingPendingTaskId(taskId);
+    pendingSubmitControllersRef.current.get(taskId)?.abort();
   }
 
   if (loading && pendingTasks.length === 0) {
@@ -278,15 +405,19 @@ export default function VideoTasksPage() {
         )}
         {visibleEntries.map((entry) =>
           entry.kind === "pending" ? (
-            <PendingTaskCard key={entry.task.id} task={entry.task} formatDate={formatDate} locale={locale} translate={translate} />
+            <PendingTaskCard
+              key={entry.task.id}
+              task={entry.task}
+              translate={translate}
+              cancellingTaskId={cancellingPendingTaskId}
+              onCancel={handleCancelPendingTask}
+            />
           ) : (
             <TaskCard
               key={entry.task.id}
               task={entry.task}
               downloadingTaskId={downloadingTaskId}
               retryingTaskId={retryingTaskId}
-              formatDate={formatDate}
-              locale={locale}
               translate={translate}
               onDownload={handleDownload}
               onRetry={handleRetry}
@@ -300,21 +431,21 @@ export default function VideoTasksPage() {
 
 function PendingTaskCard({
   task,
-  formatDate,
-  locale,
   translate,
+  cancellingTaskId,
+  onCancel,
 }: {
   task: PendingTaskView;
-  formatDate: (value: string) => string;
-  locale: Locale;
   translate: (key: string, params?: Record<string, string | number>) => string;
+  cancellingTaskId: string;
+  onCancel: (taskId: string) => void;
 }) {
   return (
-    <div className="rounded-2xl border bg-white p-5">
+    <div className="rounded-2xl border bg-white p-4">
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <p className="font-medium text-gray-900">{renderPendingTaskStatus(translate, task.status)}</p>
+            <p className="text-base font-medium text-gray-900">{renderPendingTaskStatus(translate, task.status)}</p>
             {isPendingTaskRunning(task.status) ? <RunningStatusIndicator /> : null}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-gray-600">
@@ -323,20 +454,21 @@ function PendingTaskCard({
           </div>
           <p className="mt-1 break-all text-xs text-gray-500">{translate("dashboard.tasks.taskId", { id: task.id })}</p>
         </div>
-      </div>
-      <div className="mt-4 grid gap-2 text-sm text-gray-600 md:grid-cols-2">
-        <p>{translate("common.resolution")}：{task.resolution}</p>
-        <p>{translate("common.aspectRatio")}：{task.aspect_ratio}</p>
-        <p>{translate("common.duration")}：{translate("common.seconds", { value: task.duration_seconds })}</p>
-        <p>{translate("dashboard.tasks.serviceTierLabel", { value: renderServiceTier(translate, task.service_tier) })}</p>
-        <p>{translate("dashboard.tasks.creditUsage", { charged: task.charged_quota_consumed, planned: task.planned_quota_consumed })}</p>
-        {task.segment_count ? <p>{translate("dashboard.tasks.segmentCount", { value: task.segment_count })}</p> : null}
-        <p>{translate("common.createdAt")}：{formatDate(task.created_at)}</p>
-        {task.error_message ? (
-          <p className="text-red-600">
-            {translate("common.error")}：{renderTaskError(locale, task.error_message)}
-          </p>
+        {task.status === "uploading" ? (
+          <button
+            type="button"
+            onClick={() => onCancel(task.id)}
+            disabled={cancellingTaskId === task.id}
+            className="rounded-md border px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            {cancellingTaskId === task.id ? translate("common.cancelling") : translate("common.cancel")}
+          </button>
         ) : null}
+      </div>
+      <div className="mt-4 grid gap-2 text-xs text-gray-600 md:grid-cols-2">
+        <p>{translate("dashboard.tasks.creditUsage", { charged: task.charged_quota_consumed, planned: task.planned_quota_consumed })}</p>
+        <p>{translate("dashboard.tasks.chargeStatusLabel", { value: translate("dashboard.tasks.chargePending") })}</p>
+        <TaskErrorBlock translate={translate} errorCode={task.error_code} errorMessage={task.error_message} />
       </div>
     </div>
   );
@@ -346,8 +478,6 @@ function TaskCard({
   task,
   downloadingTaskId,
   retryingTaskId,
-  formatDate,
-  locale,
   translate,
   onDownload,
   onRetry,
@@ -355,20 +485,23 @@ function TaskCard({
   task: VideoTask;
   downloadingTaskId: string;
   retryingTaskId: string;
-  formatDate: (value: string) => string;
-  locale: Locale;
   translate: (key: string, params?: Record<string, string | number>) => string;
   onDownload: (task: VideoTask) => Promise<void>;
   onRetry: (task: VideoTask) => Promise<void>;
 }) {
   const hasFailedLongSegments = task.task_type === "long" && !!task.long_segments?.some((segment) => segment.status === "failed");
+  const hasRetryableLongSegments =
+    task.task_type === "long" && !!task.long_segments?.some((segment) => segment.status === "failed" && segment.error_retryable !== false);
+  const canRetry =
+    (task.status === "failed" && task.error_retryable !== false) ||
+    hasRetryableLongSegments;
 
   return (
-    <div className="rounded-2xl border bg-white p-5">
+    <div className="rounded-2xl border bg-white p-4">
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <p className="font-medium text-gray-900">{renderStatus(translate, task.status, task.task_type, hasFailedLongSegments)}</p>
+            <p className="text-base font-medium text-gray-900">{renderStatus(translate, task.status, task.task_type, hasFailedLongSegments)}</p>
             {isTaskRunning(task.status, task.task_type, hasFailedLongSegments) ? <RunningStatusIndicator /> : null}
             {renderServiceTierBadge(translate, task.service_tier)}
           </div>
@@ -376,7 +509,7 @@ function TaskCard({
           <p className="mt-1 break-all text-xs text-gray-500">{translate("dashboard.tasks.taskId", { id: task.id })}</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          {hasFailedLongSegments ? (
+          {canRetry ? (
             <button
               type="button"
               onClick={() => void onRetry(task)}
@@ -398,29 +531,11 @@ function TaskCard({
           )}
         </div>
       </div>
-      <div className="mt-4 grid gap-2 text-sm text-gray-600 md:grid-cols-2">
-        <p>{translate("common.resolution")}：{task.resolution}</p>
-        <p>{translate("common.aspectRatio")}：{task.aspect_ratio}</p>
-        <p>{translate("common.duration")}：{translate("common.seconds", { value: task.duration_seconds })}</p>
-        <p>{translate("dashboard.tasks.serviceTierLabel", { value: renderServiceTier(translate, task.service_tier) })}</p>
+      <div className="mt-4 grid gap-2 text-xs text-gray-600 md:grid-cols-2">
         <p>{translate("dashboard.tasks.creditUsage", { charged: task.charged_quota_consumed, planned: task.planned_quota_consumed })}</p>
         <p>{translate("dashboard.tasks.chargeStatusLabel", { value: renderChargeStatus(translate, task.charge_status) })}</p>
-        {task.segment_count ? <p>{translate("dashboard.tasks.segmentCount", { value: task.segment_count })}</p> : null}
-        {task.segment_count ? <p>{translate("dashboard.tasks.completedSegments", { value: task.completed_segments ?? 0 })}</p> : null}
-        <p>{translate("common.createdAt")}：{formatDate(task.created_at)}</p>
-        <p>{translate("dashboard.tasks.queuedAt", { value: formatDate(task.queued_at) })}</p>
-        {task.processing_started_at ? <p>{translate("dashboard.tasks.startedAt", { value: formatDate(task.processing_started_at) })}</p> : null}
-        {task.finished_at ? <p>{translate("dashboard.tasks.finishedAt", { value: formatDate(task.finished_at) })}</p> : null}
-        {task.queue_wait_seconds != null ? <p>{translate("dashboard.tasks.queueWait", { value: formatElapsed(task.queue_wait_seconds, translate) })}</p> : null}
         {task.processing_seconds != null ? <p>{translate("dashboard.tasks.processingTime", { value: formatElapsed(task.processing_seconds, translate) })}</p> : null}
-        {task.total_elapsed_seconds != null ? <p>{translate("dashboard.tasks.totalElapsed", { value: formatElapsed(task.total_elapsed_seconds, translate) })}</p> : null}
-        {task.provider_name && <p>{translate("common.provider")}：{task.provider_name}</p>}
-        {task.provider_status ? <p>{translate("dashboard.tasks.providerStatusLabel", { value: renderProviderStatus(translate, task.provider_status) })}</p> : null}
-        {task.error_message && (
-          <p className="text-red-600">
-            {translate("common.error")}：{renderTaskError(locale, task.error_message)}
-          </p>
-        )}
+        <TaskErrorBlock translate={translate} errorCode={task.error_code} errorMessage={task.error_message} />
       </div>
       {task.service_tier === "flex" && task.status !== "succeeded" && task.status !== "failed" ? (
         <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">
@@ -430,9 +545,13 @@ function TaskCard({
       {task.task_type === "long" && task.long_segments && task.long_segments.length > 0 ? (
         <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-4">
           <div className="mb-3">
-            <p className="font-medium text-gray-900">{translate("dashboard.tasks.segmentTasksTitle")}</p>
-            <p className="mt-1 text-xs text-gray-500">{translate("dashboard.tasks.segmentTaskHint")}</p>
-            {hasFailedLongSegments ? <p className="mt-2 text-xs text-amber-700">{translate("dashboard.tasks.retryHint")}</p> : null}
+            <div className="flex items-center gap-2">
+              <p className="text-sm font-medium text-gray-900">{translate("dashboard.tasks.segmentTasksTitle")}</p>
+              <InfoTooltip
+                text={`${translate("dashboard.tasks.segmentTaskHint")} ${translate("dashboard.tasks.retryHint")}`}
+                ariaLabel={translate("dashboard.tasks.segmentTaskHelpAriaLabel")}
+              />
+            </div>
           </div>
           <div className="space-y-3">
             {task.long_segments.map((segment, index) => (
@@ -441,7 +560,6 @@ function TaskCard({
                 index={index}
                 segment={segment}
                 translate={translate}
-                locale={locale}
               />
             ))}
           </div>
@@ -551,10 +669,6 @@ function renderTaskType(translate: (key: string) => string, taskType: string) {
   return taskType;
 }
 
-function renderServiceTier(translate: (key: string) => string, serviceTier: "standard" | "flex") {
-  return serviceTier === "flex" ? translate("dashboard.tasks.serviceTierFlex") : translate("dashboard.tasks.serviceTierStandard");
-}
-
 function renderServiceTierBadge(
   translate: (key: string) => string,
   serviceTier: "standard" | "flex",
@@ -563,28 +677,44 @@ function renderServiceTierBadge(
   return <span className="rounded-full bg-violet-100 px-2 py-0.5 text-xs text-violet-700">{translate("dashboard.tasks.flexBadge")}</span>;
 }
 
-function renderProviderStatus(translate: (key: string) => string, status: string) {
-  if (status === "queued" || status === "submitted") return translate("dashboard.tasks.providerQueued");
-  if (status === "processing" || status === "provider_processing") return translate("dashboard.tasks.providerProcessing");
-  if (status === "succeeded") return translate("dashboard.tasks.providerSucceeded");
-  if (status === "failed") return translate("dashboard.tasks.providerFailed");
-  return status;
+function resolveTaskErrorDisplay(
+  errorCode?: string | null,
+  errorMessage?: string | null,
+) {
+  const title = errorCode ?? (errorMessage?.includes(".") ? errorMessage : "legacy.unstructured_error");
+  return { title };
 }
 
-function renderTaskError(locale: Locale, errorMessage: string) {
-  return translateApiError(errorMessage, locale) ?? (errorMessage.includes(".") ? t(locale, "common.requestFailed") : errorMessage);
+function TaskErrorBlock({
+  translate,
+  errorCode,
+  errorMessage,
+}: {
+  translate: (key: string, params?: Record<string, string | number>) => string;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+}) {
+  if (!errorCode && !errorMessage) {
+    return null;
+  }
+  const { title } = resolveTaskErrorDisplay(errorCode, errorMessage);
+  return (
+    <div className="text-xs text-red-600">
+      <p className="break-all">
+        {translate("common.error")}：{title}
+      </p>
+    </div>
+  );
 }
 
 function SegmentTaskTreeNode({
   index,
   segment,
   translate,
-  locale,
 }: {
   index: number;
   segment: LongVideoSegmentStatus;
   translate: (key: string, params?: Record<string, string | number>) => string;
-  locale: Locale;
 }) {
   const isActive = segment.status === "processing";
   const statusClass =
@@ -605,30 +735,35 @@ function SegmentTaskTreeNode({
         <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
           <div>
             <div className="flex flex-wrap items-center gap-2">
-              <p className="font-medium text-gray-900">{translate("dashboard.tasks.segmentTaskLabel", { index: index + 1 })}</p>
+              <p className="text-sm font-medium text-gray-900">{translate("dashboard.tasks.segmentTaskLabel", { index: index + 1 })}</p>
               {isActive ? <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs text-blue-700">{translate("dashboard.tasks.activeSegment")}</span> : null}
             </div>
-            <p className="mt-1 text-sm text-gray-600">{renderSegmentStatus(translate, segment.status)}</p>
           </div>
-          <p className="text-sm text-gray-500">{translate("common.duration")}：{translate("common.seconds", { value: segment.duration_seconds })}</p>
+          <p className="text-xs text-gray-500">{translate("common.duration")}：{translate("common.seconds", { value: segment.duration_seconds })}</p>
         </div>
-        {segment.provider_task_id ? (
-          <p className="mt-2 break-all text-xs text-gray-500">
-            {translate("dashboard.tasks.segmentProviderTaskId", { id: segment.provider_task_id })}
-          </p>
-        ) : null}
-        <div className="mt-3 grid gap-2 text-sm text-gray-600 md:grid-cols-2">
+        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-600">
+          <p>{renderSegmentStatus(translate, segment.status)}</p>
           {segment.processing_seconds != null ? <p>{translate("dashboard.tasks.segmentProcessingTime", { value: formatElapsed(segment.processing_seconds, translate) })}</p> : null}
-          {segment.total_elapsed_seconds != null ? <p>{translate("dashboard.tasks.segmentTotalElapsed", { value: formatElapsed(segment.total_elapsed_seconds, translate) })}</p> : null}
+          {segment.error_code || segment.error_message ? (
+            <TaskErrorInline translate={translate} errorCode={segment.error_code} errorMessage={segment.error_message} />
+          ) : null}
         </div>
-        {segment.error_message ? (
-          <p className="mt-2 text-sm text-red-600">
-            {translate("common.error")}：{renderTaskError(locale, segment.error_message)}
-          </p>
-        ) : null}
       </div>
     </div>
   );
+}
+
+function TaskErrorInline({
+  translate,
+  errorCode,
+  errorMessage,
+}: {
+  translate: (key: string, params?: Record<string, string | number>) => string;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+}) {
+  const { title } = resolveTaskErrorDisplay(errorCode, errorMessage);
+  return <p className="break-all text-[11px] text-red-600">{translate("common.error")}：{title}</p>;
 }
 
 function renderSegmentStatus(translate: (key: string) => string, status: string) {

@@ -4,6 +4,7 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
@@ -11,8 +12,9 @@ from uuid import UUID
 
 import httpx
 from fastapi import UploadFile
-from PIL import Image
+from PIL import Image, ImageDraw, ImageOps
 from sqlalchemy import Select, func, select
+from sqlalchemy.exc import MissingGreenlet, ProgrammingError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.api_errors import AppError
@@ -21,6 +23,9 @@ from backend.core.database import AsyncSessionLocal
 from backend.core.redis_client import get_redis
 from backend.core.entitlements import (
     BASIC_SHORT_VIDEO_DURATION_SECONDS,
+    CAPABILITY_AVATAR_OVERLAY,
+    CAPABILITY_ENDING_PROFILE_CARD,
+    CAPABILITY_LOGO_POSITION_CUSTOMIZE,
     CAPABILITY_MERGE_DRAG_REORDER,
     CAPABILITY_MERGE_PER_IMAGE_TEMPLATE,
     CAPABILITY_MERGE_PER_SEGMENT_DURATION,
@@ -33,15 +38,22 @@ from backend.core.scene_templates import (
     load_scene_templates,
     validate_scene_template_property_type,
 )
+from backend.models.avatar_asset import AvatarAsset
 from backend.models.long_video_segment import LongVideoSegment
 from backend.models.logo_asset import LogoAsset
+from backend.models.profile_card import ProfileCard
 from backend.models.scene_template import SceneTemplate
 from backend.models.user import User
 from backend.models.video_task import VideoTask
 from backend.schemas.video import (
     LongVideoSegmentInput,
     LongVideoSegmentStatusOut,
+    ProfileCardOptionFlags,
+    ProfileCardOut,
+    UploadAvatarResponse,
     UploadLogoResponse,
+    UpsertProfileCardRequest,
+    UserAvatarOut,
     UserLogoOut,
     VideoTaskListItem,
     VideoTaskOut,
@@ -63,8 +75,11 @@ from backend.services.video_provider import (
     GeneratedVideo,
     ProviderTaskSnapshot,
     SubmittedVideoTask,
+    apply_avatar_to_video_file,
     apply_logo_to_video_file,
+    create_profile_card_video,
     get_video_provider,
+    render_profile_card_preview_bytes,
 )
 
 ALLOWED_IMAGE_CONTENT_TYPES = {
@@ -115,10 +130,219 @@ STALE_VIDEO_TASK_STATUSES = (
 )
 PROVIDER_QUEUE_LOCK_KEY = "video_provider:queue_claim_lock"
 TASK_EXECUTION_LOCK_PREFIX = "video_task:execution"
+TASK_ERROR_SOURCE_VALIDATION = "validation"
+TASK_ERROR_SOURCE_QUEUE = "queue"
+TASK_ERROR_SOURCE_PROVIDER = "provider"
+TASK_ERROR_SOURCE_MERGE = "merge"
+TASK_ERROR_SOURCE_BILLING = "billing"
+TASK_ERROR_SOURCE_STORAGE = "storage"
+TASK_ERROR_SOURCE_AUTH = "auth"
+TASK_ERROR_SOURCE_INTERNAL = "internal"
+
+
+@dataclass
+class TaskFailureInfo:
+    code: str
+    source: str
+    detail: str | None = None
+    retryable: bool | None = None
+    message: str | None = None
+
+
+KNOWN_EXCEPTION_CODE_MAPPINGS: tuple[tuple[type[BaseException], str, str, bool], ...] = (
+    (MissingGreenlet, "videos.internal.asyncContext", TASK_ERROR_SOURCE_INTERNAL, False),
+    (ProgrammingError, "videos.internal.persistenceFailed", TASK_ERROR_SOURCE_INTERNAL, False),
+    (SQLAlchemyError, "videos.internal.persistenceFailed", TASK_ERROR_SOURCE_INTERNAL, False),
+    (FileNotFoundError, "videos.storage.fileMissing", TASK_ERROR_SOURCE_STORAGE, True),
+    (httpx.TimeoutException, "videos.provider.timeout", TASK_ERROR_SOURCE_PROVIDER, True),
+    (TimeoutError, "videos.provider.timeout", TASK_ERROR_SOURCE_PROVIDER, True),
+    (httpx.HTTPStatusError, "videos.provider.unavailable", TASK_ERROR_SOURCE_PROVIDER, True),
+    (httpx.HTTPError, "videos.provider.unavailable", TASK_ERROR_SOURCE_PROVIDER, True),
+    (ConnectionError, "videos.provider.unavailable", TASK_ERROR_SOURCE_PROVIDER, True),
+    (OSError, "videos.provider.unavailable", TASK_ERROR_SOURCE_PROVIDER, True),
+)
 
 
 def normalize_service_tier(service_tier: str | None) -> str:
     return (service_tier or TASK_SERVICE_TIER_STANDARD).strip().lower()
+
+
+def classify_task_error_source(error_code: str | None) -> str:
+    if not error_code:
+        return TASK_ERROR_SOURCE_INTERNAL
+    if error_code.startswith("videos.queue.") or error_code.startswith("videos.task."):
+        return TASK_ERROR_SOURCE_QUEUE
+    if error_code.startswith("videos.provider.") or error_code.startswith("videos.flex."):
+        return TASK_ERROR_SOURCE_PROVIDER
+    if error_code.startswith("videos.merge.") or error_code.startswith("videos.long.segment"):
+        return TASK_ERROR_SOURCE_MERGE
+    if error_code.startswith("videos.storage."):
+        return TASK_ERROR_SOURCE_STORAGE
+    if error_code.startswith("videos.auth.") or error_code.startswith("auth."):
+        return TASK_ERROR_SOURCE_AUTH
+    if error_code.startswith("videos.quota.") or error_code.startswith("billing."):
+        return TASK_ERROR_SOURCE_BILLING
+    if error_code.startswith("videos.validation.") or error_code.startswith("videos.upload.") or error_code.startswith("videos.template."):
+        return TASK_ERROR_SOURCE_VALIDATION
+    return TASK_ERROR_SOURCE_INTERNAL
+
+
+def infer_task_error_retryable(error_code: str | None, source: str) -> bool:
+    if error_code in {
+        "videos.task.enqueueFailed",
+        "videos.task.queueUnavailable",
+        "videos.flex.timeout",
+        "videos.flex.providerTaskMissing",
+        "videos.provider.failed",
+        "videos.provider.timeout",
+        "videos.provider.unavailable",
+        "videos.provider.missingVideoUrl",
+        "videos.merge.failed",
+        "videos.storage.fileMissing",
+        "videos.internal.unexpected",
+        "videos.long.segmentFailed",
+    }:
+        return True
+    if source in {TASK_ERROR_SOURCE_QUEUE, TASK_ERROR_SOURCE_PROVIDER, TASK_ERROR_SOURCE_MERGE, TASK_ERROR_SOURCE_STORAGE, TASK_ERROR_SOURCE_INTERNAL}:
+        return True
+    return False
+
+
+def clear_task_error_state(task: VideoTask) -> None:
+    task.error_code = None
+    task.error_source = None
+    task.error_detail = None
+    task.error_retryable = None
+    task.error_message = None
+
+
+def clear_segment_error_state(segment: LongVideoSegment) -> None:
+    segment.error_code = None
+    segment.error_source = None
+    segment.error_detail = None
+    segment.error_retryable = None
+    segment.error_message = None
+
+
+def map_known_exception_to_failure(
+    error: Exception,
+    *,
+    fallback_code: str,
+    source_hint: str | None = None,
+    retryable_hint: bool | None = None,
+) -> TaskFailureInfo | None:
+    for exc_type, mapped_code, mapped_source, mapped_retryable in KNOWN_EXCEPTION_CODE_MAPPINGS:
+        if isinstance(error, exc_type):
+            code = mapped_code
+            source = source_hint or mapped_source
+            retryable = mapped_retryable if retryable_hint is None else retryable_hint
+            if source_hint == TASK_ERROR_SOURCE_QUEUE and code == "videos.provider.timeout":
+                code = "videos.task.queueUnavailable"
+                source = TASK_ERROR_SOURCE_QUEUE
+            return TaskFailureInfo(
+                code=code,
+                source=source,
+                detail=str(error),
+                retryable=retryable,
+                message=code,
+            )
+    return None
+
+
+def build_task_failure_info(
+    error: Exception | str | TaskFailureInfo,
+    *,
+    fallback_code: str = "videos.internal.unexpected",
+    source_hint: str | None = None,
+    detail_hint: str | None = None,
+    retryable_hint: bool | None = None,
+) -> TaskFailureInfo:
+    if isinstance(error, TaskFailureInfo):
+        resolved_source = error.source or classify_task_error_source(error.code)
+        resolved_retryable = error.retryable if error.retryable is not None else infer_task_error_retryable(error.code, resolved_source)
+        return TaskFailureInfo(
+            code=error.code,
+            source=resolved_source,
+            detail=error.detail,
+            retryable=resolved_retryable,
+            message=error.message,
+        )
+
+    if isinstance(error, (AppError, PermissionDeniedError)):
+        code = error.code
+        source = source_hint or classify_task_error_source(code)
+        retryable = retryable_hint if retryable_hint is not None else infer_task_error_retryable(code, source)
+        return TaskFailureInfo(code=code, source=source, detail=detail_hint, retryable=retryable, message=code)
+
+    if isinstance(error, str):
+        if error.startswith(("videos.", "billing.", "auth.")):
+            code = error
+            source = source_hint or classify_task_error_source(code)
+            retryable = retryable_hint if retryable_hint is not None else infer_task_error_retryable(code, source)
+            return TaskFailureInfo(code=code, source=source, detail=detail_hint, retryable=retryable, message=code)
+        source = source_hint or classify_task_error_source(fallback_code)
+        retryable = retryable_hint if retryable_hint is not None else infer_task_error_retryable(fallback_code, source)
+        return TaskFailureInfo(code=fallback_code, source=source, detail=error, retryable=retryable, message=fallback_code)
+
+    if isinstance(error, RuntimeError):
+        message = str(error)
+        if "greenlet_spawn has not been called" in message or "await_only()" in message:
+            return TaskFailureInfo(
+                code="videos.internal.asyncContext",
+                source=source_hint or TASK_ERROR_SOURCE_INTERNAL,
+                detail=message,
+                retryable=False if retryable_hint is None else retryable_hint,
+                message="videos.internal.asyncContext",
+            )
+        if message.startswith(("videos.", "billing.", "auth.")):
+            code = message
+            source = source_hint or classify_task_error_source(code)
+            retryable = retryable_hint if retryable_hint is not None else infer_task_error_retryable(code, source)
+            return TaskFailureInfo(code=code, source=source, detail=detail_hint, retryable=retryable, message=code)
+        if "轮询超时" in message:
+            return TaskFailureInfo(
+                code="videos.provider.timeout",
+                source=source_hint or TASK_ERROR_SOURCE_PROVIDER,
+                detail=message,
+                retryable=True if retryable_hint is None else retryable_hint,
+                message="videos.provider.timeout",
+            )
+        if "未返回可下载的视频地址" in message:
+            return TaskFailureInfo(
+                code="videos.provider.missingVideoUrl",
+                source=source_hint or TASK_ERROR_SOURCE_PROVIDER,
+                detail=message,
+                retryable=True if retryable_hint is None else retryable_hint,
+                message="videos.provider.missingVideoUrl",
+            )
+        if "视频生成失败" in message:
+            return TaskFailureInfo(
+                code="videos.provider.failed",
+                source=source_hint or TASK_ERROR_SOURCE_PROVIDER,
+                detail=message,
+                retryable=True if retryable_hint is None else retryable_hint,
+                message="videos.provider.failed",
+            )
+
+    known_failure = map_known_exception_to_failure(
+        error,
+        fallback_code=fallback_code,
+        source_hint=source_hint,
+        retryable_hint=retryable_hint,
+    )
+    if known_failure is not None:
+        return known_failure
+
+    if isinstance(error, ValueError):
+        code = fallback_code if fallback_code != "videos.internal.unexpected" else "videos.validation.invalidState"
+        source = source_hint or classify_task_error_source(code)
+        retryable = retryable_hint if retryable_hint is not None else infer_task_error_retryable(code, source)
+        return TaskFailureInfo(code=code, source=source, detail=str(error), retryable=retryable, message=code)
+
+    code = fallback_code
+    source = source_hint or classify_task_error_source(code)
+    retryable = retryable_hint if retryable_hint is not None else infer_task_error_retryable(code, source)
+    return TaskFailureInfo(code=code, source=source, detail=str(error), retryable=retryable, message=code)
 
 
 def validate_service_tier_for_task_type(*, task_type: str, service_tier: str | None) -> str:
@@ -221,6 +445,23 @@ async def list_scene_templates(
     return list((await db.execute(stmt)).scalars().all())
 
 
+def _build_circle_avatar_bytes(data: bytes, *, size: int = 512) -> bytes:
+    with Image.open(BytesIO(data)) as image:
+        source = ImageOps.exif_transpose(image).convert("RGBA")
+
+    square = ImageOps.fit(source, (size, size), method=Image.Resampling.LANCZOS)
+    mask = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.ellipse((0, 0, size - 1, size - 1), fill=255)
+
+    avatar = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    avatar.paste(square, (0, 0), mask)
+
+    output = BytesIO()
+    avatar.save(output, format="PNG")
+    return output.getvalue()
+
+
 async def list_user_logos(db: AsyncSession, user_id: UUID) -> list[UserLogoOut]:
     stmt = (
         select(LogoAsset)
@@ -256,6 +497,242 @@ async def upload_logo_asset(db: AsyncSession, user_id: UUID, file: UploadFile, d
     return UploadLogoResponse(id=logo.id, key=logo.key, name=logo.display_name, is_default=logo.is_default)
 
 
+async def list_user_avatars(db: AsyncSession, user_id: UUID) -> list[UserAvatarOut]:
+    stmt = (
+        select(AvatarAsset)
+        .where(AvatarAsset.user_id == user_id)
+        .order_by(AvatarAsset.is_default.desc(), AvatarAsset.created_at.desc())
+    )
+    avatars = list((await db.execute(stmt)).scalars().all())
+    return [
+        UserAvatarOut(id=avatar.id, key=avatar.key, name=avatar.display_name, is_default=avatar.is_default)
+        for avatar in avatars
+    ]
+
+
+async def get_user_avatar_asset(db: AsyncSession, user_id: UUID, avatar_id: UUID) -> AvatarAsset | None:
+    stmt = select(AvatarAsset).where(AvatarAsset.user_id == user_id, AvatarAsset.id == avatar_id)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def get_user_logo_asset(db: AsyncSession, user_id: UUID, logo_id: UUID) -> LogoAsset | None:
+    stmt = select(LogoAsset).where(LogoAsset.user_id == user_id, LogoAsset.id == logo_id)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def upload_avatar_asset(db: AsyncSession, user_id: UUID, file: UploadFile, display_name: str | None) -> UploadAvatarResponse:
+    data = await read_valid_image_upload(file)
+    processed = _build_circle_avatar_bytes(data)
+    key = await save_bytes(f"uploads/{user_id}/avatars", processed, ".png", "image/png")
+    name = (display_name or "").strip() or Path(file.filename or "").stem or "未命名头像"
+
+    existing_default_stmt = select(AvatarAsset).where(
+        AvatarAsset.user_id == user_id,
+        AvatarAsset.is_default.is_(True),
+    )
+    existing_default = (await db.execute(existing_default_stmt)).scalar_one_or_none()
+
+    avatar = AvatarAsset(
+        user_id=user_id,
+        key=key,
+        display_name=name[:100],
+        is_default=existing_default is None,
+    )
+    db.add(avatar)
+    await db.flush()
+    await db.refresh(avatar)
+    return UploadAvatarResponse(id=avatar.id, key=avatar.key, name=avatar.display_name, is_default=avatar.is_default)
+
+
+async def set_default_avatar(db: AsyncSession, user_id: UUID, avatar_id: UUID) -> UserAvatarOut:
+    stmt = select(AvatarAsset).where(AvatarAsset.user_id == user_id)
+    avatars = list((await db.execute(stmt)).scalars().all())
+    target = next((avatar for avatar in avatars if avatar.id == avatar_id), None)
+    if target is None:
+        raise AppError("videos.avatar.notFound")
+
+    for avatar in avatars:
+        avatar.is_default = avatar.id == avatar_id
+    await db.flush()
+    return UserAvatarOut(id=target.id, key=target.key, name=target.display_name, is_default=target.is_default)
+
+
+async def delete_avatar_asset(db: AsyncSession, user_id: UUID, avatar_id: UUID) -> None:
+    stmt = select(AvatarAsset).where(AvatarAsset.user_id == user_id)
+    avatars = list((await db.execute(stmt)).scalars().all())
+    target = next((avatar for avatar in avatars if avatar.id == avatar_id), None)
+    if target is None:
+        raise AppError("videos.avatar.notFound")
+
+    profile_card_stmt = select(ProfileCard).where(
+        ProfileCard.user_id == user_id,
+        ProfileCard.avatar_asset_id == avatar_id,
+    )
+    linked_cards = list((await db.execute(profile_card_stmt)).scalars().all())
+    for card in linked_cards:
+        card.avatar_asset_id = None
+        card.show_avatar_default = False
+
+    await delete_key(target.key)
+    was_default = target.is_default
+    await db.delete(target)
+    await db.flush()
+
+    if was_default:
+        remaining = [avatar for avatar in avatars if avatar.id != avatar_id]
+        if remaining:
+            newest = sorted(remaining, key=lambda item: item.created_at, reverse=True)[0]
+            newest.is_default = True
+            await db.flush()
+
+
+async def list_profile_cards(db: AsyncSession, user_id: UUID) -> list[ProfileCardOut]:
+    stmt = (
+        select(ProfileCard)
+        .where(ProfileCard.user_id == user_id)
+        .order_by(ProfileCard.is_default.desc(), ProfileCard.updated_at.desc(), ProfileCard.created_at.desc())
+    )
+    cards = list((await db.execute(stmt)).scalars().all())
+    return [ProfileCardOut.model_validate(card) for card in cards]
+
+
+async def upsert_profile_card(
+    db: AsyncSession,
+    user_id: UUID,
+    body: UpsertProfileCardRequest,
+    *,
+    profile_card_id: UUID | None = None,
+) -> ProfileCardOut:
+    card = None
+    if profile_card_id is not None:
+        stmt = select(ProfileCard).where(ProfileCard.user_id == user_id, ProfileCard.id == profile_card_id)
+        card = (await db.execute(stmt)).scalar_one_or_none()
+        if card is None:
+            raise AppError("videos.profileCard.notFound")
+
+    if body.avatar_asset_id is not None:
+        avatar_stmt = select(AvatarAsset).where(AvatarAsset.user_id == user_id, AvatarAsset.id == body.avatar_asset_id)
+        if (await db.execute(avatar_stmt)).scalar_one_or_none() is None:
+            raise AppError("videos.avatar.notFound")
+    if card is None:
+        existing_default_stmt = select(ProfileCard).where(ProfileCard.user_id == user_id, ProfileCard.is_default.is_(True))
+        existing_default = (await db.execute(existing_default_stmt)).scalar_one_or_none()
+        card = ProfileCard(
+            user_id=user_id,
+            display_name=body.display_name.strip(),
+            template_key=body.template_key,
+            full_name=body.full_name.strip(),
+            slogan=body.slogan.strip(),
+            phone=body.phone.strip(),
+            contact_address=body.contact_address.strip(),
+            homepage=body.homepage.strip(),
+            email=body.email.strip(),
+            brokerage_name=body.brokerage_name.strip(),
+            avatar_asset_id=body.avatar_asset_id,
+            logo_asset_id=None,
+            is_default=body.is_default or existing_default is None,
+            show_avatar_default=body.show_avatar_default,
+            show_name_default=body.show_name_default,
+            show_phone_default=body.show_phone_default,
+            show_address_default=body.show_address_default,
+            show_brokerage_default=body.show_brokerage_default,
+            show_logo_default=False,
+        )
+        db.add(card)
+    else:
+        card.display_name = body.display_name.strip()
+        card.template_key = body.template_key
+        card.full_name = body.full_name.strip()
+        card.slogan = body.slogan.strip()
+        card.phone = body.phone.strip()
+        card.contact_address = body.contact_address.strip()
+        card.homepage = body.homepage.strip()
+        card.email = body.email.strip()
+        card.brokerage_name = body.brokerage_name.strip()
+        card.avatar_asset_id = body.avatar_asset_id
+        card.logo_asset_id = None
+        card.is_default = body.is_default
+        card.show_avatar_default = body.show_avatar_default
+        card.show_name_default = body.show_name_default
+        card.show_phone_default = body.show_phone_default
+        card.show_address_default = body.show_address_default
+        card.show_brokerage_default = body.show_brokerage_default
+        card.show_logo_default = False
+
+    if card.is_default:
+        existing_stmt = select(ProfileCard).where(ProfileCard.user_id == user_id)
+        existing_cards = list((await db.execute(existing_stmt)).scalars().all())
+        for existing in existing_cards:
+            if existing.id != card.id:
+                existing.is_default = False
+
+    await db.flush()
+    await db.refresh(card)
+    return ProfileCardOut.model_validate(card)
+
+
+async def delete_profile_card(db: AsyncSession, user_id: UUID, profile_card_id: UUID) -> None:
+    stmt = select(ProfileCard).where(ProfileCard.user_id == user_id)
+    cards = list((await db.execute(stmt)).scalars().all())
+    target = next((card for card in cards if card.id == profile_card_id), None)
+    if target is None:
+        raise AppError("videos.profileCard.notFound")
+
+    was_default = target.is_default
+    await db.delete(target)
+    await db.flush()
+
+    if was_default:
+        remaining = [card for card in cards if card.id != profile_card_id]
+        if remaining:
+            newest = sorted(remaining, key=lambda item: item.updated_at or item.created_at, reverse=True)[0]
+            newest.is_default = True
+            await db.flush()
+
+
+async def generate_profile_card_preview_png(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    profile_card_id: UUID,
+    resolution: str = "1080p",
+    aspect_ratio: str = "16:9",
+) -> bytes:
+    card_data = await build_profile_card_snapshot(
+        db,
+        user_id=user_id,
+        profile_card_id=profile_card_id,
+        options=None,
+    )
+    if card_data is None:
+        raise AppError("videos.profileCard.notFound")
+    return render_profile_card_preview_bytes(
+        card_data=card_data,
+        resolution=resolution,
+        aspect_ratio=aspect_ratio,
+    )
+
+
+async def generate_profile_card_preview_png_from_request(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    body: UpsertProfileCardRequest,
+    resolution: str = "1080p",
+    aspect_ratio: str = "16:9",
+) -> bytes:
+    card_data = await build_profile_card_snapshot_from_request(
+        db,
+        user_id=user_id,
+        body=body,
+    )
+    return render_profile_card_preview_bytes(
+        card_data=card_data,
+        resolution=resolution,
+        aspect_ratio=aspect_ratio,
+    )
+
+
 async def set_default_logo(db: AsyncSession, user_id: UUID, logo_id: UUID) -> UserLogoOut:
     stmt = select(LogoAsset).where(LogoAsset.user_id == user_id)
     logos = list((await db.execute(stmt)).scalars().all())
@@ -275,6 +752,15 @@ async def delete_logo_asset(db: AsyncSession, user_id: UUID, logo_id: UUID) -> N
     target = next((logo for logo in logos if logo.id == logo_id), None)
     if target is None:
         raise AppError("videos.logo.notFound")
+
+    profile_card_stmt = select(ProfileCard).where(
+        ProfileCard.user_id == user_id,
+        ProfileCard.logo_asset_id == logo_id,
+    )
+    linked_cards = list((await db.execute(profile_card_stmt)).scalars().all())
+    for card in linked_cards:
+        card.logo_asset_id = None
+        card.show_logo_default = False
 
     await delete_key(target.key)
     was_default = target.is_default
@@ -299,14 +785,7 @@ async def get_default_logo_key(db: AsyncSession, user_id: UUID) -> str | None:
 
 
 async def save_image_upload(file: UploadFile, prefix: str) -> str:
-    if file.content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
-        raise AppError("videos.upload.invalidImageType")
-
-    data = await file.read()
-    if not data:
-        raise AppError("videos.upload.emptyFile")
-    if len(data) > MAX_UPLOAD_SIZE_BYTES:
-        raise AppError("videos.upload.fileTooLarge")
+    data = await read_valid_image_upload(file)
     try:
         with Image.open(BytesIO(data)) as image:
             image.verify()
@@ -315,6 +794,18 @@ async def save_image_upload(file: UploadFile, prefix: str) -> str:
 
     extension = Path(file.filename or "").suffix.lower() or ALLOWED_IMAGE_CONTENT_TYPES[file.content_type]
     return await save_bytes(prefix, data, extension, file.content_type)
+
+
+async def read_valid_image_upload(file: UploadFile) -> bytes:
+    if file.content_type not in ALLOWED_IMAGE_CONTENT_TYPES:
+        raise AppError("videos.upload.invalidImageType")
+
+    data = await file.read()
+    if not data:
+        raise AppError("videos.upload.emptyFile")
+    if len(data) > MAX_UPLOAD_SIZE_BYTES:
+        raise AppError("videos.upload.fileTooLarge")
+    return data
 
 
 async def validate_user_image_key(user_id: UUID, image_key: str) -> None:
@@ -336,6 +827,100 @@ async def validate_user_logo_key(db: AsyncSession, user_id: UUID, logo_key: str 
     logo_stmt = select(LogoAsset).where(LogoAsset.user_id == user_id, LogoAsset.key == logo_key)
     if (await db.execute(logo_stmt)).scalar_one_or_none() is None:
         raise AppError("videos.logo.invalidOwnership")
+
+
+async def validate_user_avatar_key(db: AsyncSession, user_id: UUID, avatar_key: str | None) -> None:
+    if not avatar_key:
+        return
+    user_avatar_prefix = f"uploads/{user_id}/avatars/"
+    if not avatar_key.startswith(user_avatar_prefix):
+        raise AppError("videos.avatar.invalidOwnership")
+    if not await ensure_key_exists(avatar_key):
+        raise AppError("videos.avatar.missing")
+    avatar_stmt = select(AvatarAsset).where(AvatarAsset.user_id == user_id, AvatarAsset.key == avatar_key)
+    if (await db.execute(avatar_stmt)).scalar_one_or_none() is None:
+        raise AppError("videos.avatar.invalidOwnership")
+
+
+async def build_profile_card_snapshot(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    profile_card_id: UUID | None,
+    options: ProfileCardOptionFlags | None,
+) -> dict | None:
+    if profile_card_id is None:
+        return None
+
+    stmt = select(ProfileCard).where(ProfileCard.user_id == user_id, ProfileCard.id == profile_card_id)
+    card = (await db.execute(stmt)).scalar_one_or_none()
+    if card is None:
+        raise AppError("videos.profileCard.notFound")
+
+    avatar_key: str | None = None
+    if card.avatar_asset_id:
+        avatar_stmt = select(AvatarAsset).where(AvatarAsset.user_id == user_id, AvatarAsset.id == card.avatar_asset_id)
+        avatar = (await db.execute(avatar_stmt)).scalar_one_or_none()
+        if avatar is None:
+            raise AppError("videos.avatar.notFound")
+        avatar_key = avatar.key
+
+    return {
+        "id": str(card.id),
+        "display_name": card.display_name,
+        "template_key": card.template_key,
+        "full_name": card.full_name,
+        "slogan": card.slogan,
+        "phone": card.phone,
+        "contact_address": card.contact_address,
+        "homepage": card.homepage,
+        "email": card.email,
+        "brokerage_name": card.brokerage_name,
+        "avatar_key": avatar_key,
+        "logo_key": None,
+        "include_avatar": options.include_avatar if options is not None else card.show_avatar_default,
+        "include_name": options.include_name if options is not None else card.show_name_default,
+        "include_phone": options.include_phone if options is not None else card.show_phone_default,
+        "include_address": options.include_address if options is not None else card.show_address_default,
+        "include_brokerage_name": options.include_brokerage_name if options is not None else card.show_brokerage_default,
+        "include_logo": False,
+    }
+
+
+async def build_profile_card_snapshot_from_request(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    body: UpsertProfileCardRequest,
+) -> dict:
+    avatar_key: str | None = None
+
+    if body.avatar_asset_id:
+        avatar = await get_user_avatar_asset(db, user_id, body.avatar_asset_id)
+        if avatar is None:
+            raise AppError("videos.avatar.notFound")
+        avatar_key = avatar.key
+
+    return {
+        "id": None,
+        "display_name": body.display_name.strip(),
+        "template_key": body.template_key,
+        "full_name": body.full_name.strip(),
+        "slogan": body.slogan.strip(),
+        "phone": body.phone.strip(),
+        "contact_address": body.contact_address.strip(),
+        "homepage": body.homepage.strip(),
+        "email": body.email.strip(),
+        "brokerage_name": body.brokerage_name.strip(),
+        "avatar_key": avatar_key,
+        "logo_key": None,
+        "include_avatar": body.show_avatar_default,
+        "include_name": body.show_name_default,
+        "include_phone": body.show_phone_default,
+        "include_address": body.show_address_default,
+        "include_brokerage_name": body.show_brokerage_default,
+        "include_logo": False,
+    }
 
 
 async def get_enabled_scene_template(db: AsyncSession, scene_template_id: UUID) -> SceneTemplate:
@@ -423,6 +1008,14 @@ async def create_short_video_task(
     aspect_ratio: str,
     duration_seconds: int,
     logo_key: str | None,
+    logo_position_x: float | None,
+    logo_position_y: float | None,
+    avatar_key: str | None,
+    avatar_position: str | None,
+    avatar_position_x: float | None,
+    avatar_position_y: float | None,
+    profile_card_id: UUID | None,
+    profile_card_options: ProfileCardOptionFlags | None,
     service_tier: str = TASK_SERVICE_TIER_STANDARD,
 ) -> VideoTask:
     service_tier = validate_service_tier_for_task_type(task_type=VIDEO_TASK_TYPE_SHORT, service_tier=service_tier)
@@ -441,6 +1034,17 @@ async def create_short_video_task(
 
     await validate_user_image_key(user.id, image_key)
     await validate_user_logo_key(db, user.id, logo_key)
+    await validate_user_avatar_key(db, user.id, avatar_key)
+    if avatar_key and not has_capability(access_context, CAPABILITY_AVATAR_OVERLAY):
+        raise PermissionDeniedError("videos.avatar.permissionDenied")
+    if profile_card_id and not has_capability(access_context, CAPABILITY_ENDING_PROFILE_CARD):
+        raise PermissionDeniedError("videos.profileCard.permissionDenied")
+    profile_card_data = await build_profile_card_snapshot(
+        db,
+        user_id=user.id,
+        profile_card_id=profile_card_id,
+        options=profile_card_options,
+    )
     template = await get_enabled_scene_template_by_category(
         db,
         scene_template_id,
@@ -450,6 +1054,12 @@ async def create_short_video_task(
     prompt = template.prompt.strip()
     planned_quota = 1
     await check_quota_available(db, user.id, planned_quota)
+    logo_position_x, logo_position_y = normalize_logo_overlay_position(
+        access_context,
+        logo_key=logo_key,
+        position_x=logo_position_x,
+        position_y=logo_position_y,
+    )
 
     task = VideoTask(
         user_id=user.id,
@@ -463,6 +1073,14 @@ async def create_short_video_task(
         aspect_ratio=aspect_ratio,
         duration_seconds=duration_seconds,
         logo_key=logo_key,
+        logo_position_x=logo_position_x,
+        logo_position_y=logo_position_y,
+        avatar_key=avatar_key,
+        avatar_position=avatar_position,
+        avatar_position_x=avatar_position_x,
+        avatar_position_y=avatar_position_y,
+        profile_card_id=profile_card_id,
+        profile_card_data=profile_card_data,
         quota_consumed=planned_quota,
         planned_quota_consumed=planned_quota,
         charged_quota_consumed=0,
@@ -484,6 +1102,14 @@ async def create_long_video_task(
     aspect_ratio: str,
     duration_seconds: int,
     logo_key: str | None,
+    logo_position_x: float | None,
+    logo_position_y: float | None,
+    avatar_key: str | None,
+    avatar_position: str | None,
+    avatar_position_x: float | None,
+    avatar_position_y: float | None,
+    profile_card_id: UUID | None,
+    profile_card_options: ProfileCardOptionFlags | None = None,
     segments: list[LongVideoSegmentInput] | None = None,
     service_tier: str = TASK_SERVICE_TIER_STANDARD,
 ) -> VideoTask:
@@ -510,6 +1136,17 @@ async def create_long_video_task(
     for image_key in ordered_image_keys:
         await validate_user_image_key(user.id, image_key)
     await validate_user_logo_key(db, user.id, logo_key)
+    await validate_user_avatar_key(db, user.id, avatar_key)
+    if avatar_key and not has_capability(access_context, CAPABILITY_AVATAR_OVERLAY):
+        raise PermissionDeniedError("videos.avatar.permissionDenied")
+    if profile_card_id and not has_capability(access_context, CAPABILITY_ENDING_PROFILE_CARD):
+        raise PermissionDeniedError("videos.profileCard.permissionDenied")
+    profile_card_data = await build_profile_card_snapshot(
+        db,
+        user_id=user.id,
+        profile_card_id=profile_card_id,
+        options=profile_card_options,
+    )
 
     template_ids = {segment.scene_template_id for segment in resolved_segments}
     if segments:
@@ -531,6 +1168,12 @@ async def create_long_video_task(
 
     quota_amount = len(ordered_image_keys)
     await check_quota_available(db, user.id, quota_amount)
+    logo_position_x, logo_position_y = normalize_logo_overlay_position(
+        access_context,
+        logo_key=logo_key,
+        position_x=logo_position_x,
+        position_y=logo_position_y,
+    )
 
     queued_at = datetime.now(timezone.utc)
     task = VideoTask(
@@ -545,6 +1188,14 @@ async def create_long_video_task(
         aspect_ratio=aspect_ratio,
         duration_seconds=duration_seconds,
         logo_key=logo_key,
+        logo_position_x=logo_position_x,
+        logo_position_y=logo_position_y,
+        avatar_key=avatar_key,
+        avatar_position=avatar_position,
+        avatar_position_x=avatar_position_x,
+        avatar_position_y=avatar_position_y,
+        profile_card_id=profile_card_id,
+        profile_card_data=profile_card_data,
         quota_consumed=quota_amount,
         planned_quota_consumed=quota_amount,
         charged_quota_consumed=0,
@@ -571,6 +1222,20 @@ async def create_long_video_task(
     await db.flush()
     await db.refresh(task)
     return task
+
+
+def normalize_logo_overlay_position(
+    access_context,
+    *,
+    logo_key: str | None,
+    position_x: float | None,
+    position_y: float | None,
+) -> tuple[float | None, float | None]:
+    if not logo_key:
+        return None, None
+    if has_capability(access_context, CAPABILITY_LOGO_POSITION_CUSTOMIZE):
+        return position_x, position_y
+    return 1.0, 1.0
 
 
 async def get_video_task_for_user(db: AsyncSession, user_id: UUID, task_id: UUID) -> VideoTask | None:
@@ -644,7 +1309,7 @@ def mark_task_charge_skipped(task: VideoTask) -> None:
     task.charged_at = None
 
 
-async def retry_long_video_task(
+async def retry_video_task(
     db: AsyncSession,
     *,
     user_id: UUID,
@@ -653,6 +1318,38 @@ async def retry_long_video_task(
     task = await get_video_task_for_user(db, user_id, task_id)
     if task is None:
         raise ValueError("任务不存在")
+
+    if task.task_type == VIDEO_TASK_TYPE_SHORT:
+        if task.status != VIDEO_TASK_STATUS_FAILED:
+            raise AppError("videos.task.retryUnavailable", status_code=400)
+
+        cleanup_keys: list[str] = []
+        if task.video_key:
+            cleanup_keys.append(task.video_key)
+            task.video_key = None
+
+        now = datetime.now(timezone.utc)
+        task.status = VIDEO_TASK_STATUS_SUBMITTING if is_flex_task(task) else VIDEO_TASK_STATUS_QUEUED
+        clear_task_error_state(task)
+        task.charge_status = TASK_CHARGE_STATUS_PENDING
+        task.charged_quota_consumed = 0
+        task.charged_at = None
+        task.quota_refunded_at = None
+        task.provider_name = None
+        task.provider_task_id = None
+        task.provider_status = None
+        task.provider_task_ids = None
+        task.provider_submitted_at = None
+        task.provider_last_polled_at = None
+        task.provider_completed_at = None
+        task.next_poll_at = None
+        task.processing_started_at = None
+        task.finished_at = None
+        task.expires_at = None
+        task.queued_at = now
+        await db.flush()
+        return task, cleanup_keys
+
     if task.task_type != VIDEO_TASK_TYPE_LONG:
         raise AppError("videos.task.retryUnavailable", status_code=400)
 
@@ -682,14 +1379,14 @@ async def retry_long_video_task(
                 provider_details[str(segment.id)] = {"provider_task_id": segment.provider_task_id}
             continue
         if segment.status == LONG_VIDEO_SEGMENT_STATUS_QUEUED:
-            segment.error_message = None
+            clear_segment_error_state(segment)
             continue
         if segment.segment_video_key:
             cleanup_keys.append(segment.segment_video_key)
             segment.segment_video_key = None
         segment.status = LONG_VIDEO_SEGMENT_STATUS_QUEUED
         segment.provider_task_id = None
-        segment.error_message = None
+        clear_segment_error_state(segment)
         segment.queued_at = now
         segment.processing_started_at = None
         segment.finished_at = None
@@ -698,7 +1395,7 @@ async def retry_long_video_task(
         cleanup_keys.append(task.video_key)
         task.video_key = None
     task.status = VIDEO_TASK_STATUS_PROCESSING
-    task.error_message = None
+    clear_task_error_state(task)
     task.charge_status = TASK_CHARGE_STATUS_PENDING
     task.charged_quota_consumed = 0
     task.charged_at = None
@@ -715,6 +1412,15 @@ async def retry_long_video_task(
     return task, cleanup_keys
 
 
+async def retry_long_video_task(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    task_id: UUID,
+) -> tuple[VideoTask, list[str]]:
+    return await retry_video_task(db, user_id=user_id, task_id=task_id)
+
+
 async def get_storage_days_for_user(db: AsyncSession, user_id: UUID) -> int:
     subscription = await get_active_subscription(db, user_id)
     if subscription is None:
@@ -728,6 +1434,14 @@ def create_temporary_output_path(output_path: Path) -> Path:
 
 def is_task_stale(updated_at: datetime, *, now: datetime, stale_seconds: int) -> bool:
     return updated_at <= now - timedelta(seconds=stale_seconds)
+
+
+def get_task_stale_seconds(task: VideoTask, *, startup_mode: bool = False) -> int:
+    if not startup_mode:
+        return settings.VIDEO_TASK_STALE_SECONDS
+    if task.task_type == VIDEO_TASK_TYPE_LONG:
+        return settings.VIDEO_TASK_STALE_SECONDS
+    return settings.VIDEO_TASK_STALE_STARTUP_SECONDS
 
 
 def is_retryable_provider_error(exc: Exception) -> bool:
@@ -797,10 +1511,14 @@ async def enqueue_video_task_or_fail(
 async def fail_video_task(
     db: AsyncSession,
     task_id: UUID,
-    error_message: str,
+    error: Exception | str | TaskFailureInfo,
     *,
     refund_quota_on_failure: bool = False,
     preserve_successful_long_segments: bool = False,
+    fallback_code: str = "videos.internal.unexpected",
+    source_hint: str | None = None,
+    detail_hint: str | None = None,
+    retryable_hint: bool | None = None,
 ) -> tuple[VideoTask | None, list[str]]:
     task = await db.get(VideoTask, task_id)
     if task is None:
@@ -811,6 +1529,13 @@ async def fail_video_task(
         return task, []
 
     cleanup_keys: list[str] = []
+    failure = build_task_failure_info(
+        error,
+        fallback_code=fallback_code,
+        source_hint=source_hint,
+        detail_hint=detail_hint,
+        retryable_hint=retryable_hint,
+    )
     if task.video_key:
         cleanup_keys.append(task.video_key)
         task.video_key = None
@@ -825,10 +1550,18 @@ async def fail_video_task(
             if segment.status != LONG_VIDEO_SEGMENT_STATUS_SUCCEEDED:
                 segment.status = LONG_VIDEO_SEGMENT_STATUS_FAILED
                 segment.finished_at = datetime.now(timezone.utc)
-            segment.error_message = error_message
+            segment.error_code = failure.code
+            segment.error_source = failure.source
+            segment.error_detail = failure.detail
+            segment.error_retryable = failure.retryable
+            segment.error_message = failure.message or failure.code
 
     task.status = VIDEO_TASK_STATUS_FAILED
-    task.error_message = error_message
+    task.error_code = failure.code
+    task.error_source = failure.source
+    task.error_detail = failure.detail
+    task.error_retryable = failure.retryable
+    task.error_message = failure.message or failure.code
     task.finished_at = datetime.now(timezone.utc)
     task.next_poll_at = None
     if task.provider_status != "failed":
@@ -843,6 +1576,53 @@ async def fail_video_task(
         mark_task_charge_skipped(task)
     await db.flush()
     return task, cleanup_keys
+
+
+async def fail_long_video_task_due_to_segment_error(
+    db: AsyncSession,
+    *,
+    task_id: UUID,
+    segment_id: UUID,
+    error: Exception | str | TaskFailureInfo,
+    segment_count: int,
+    completed_segments: int,
+    provider_details: dict[str, dict[str, str]],
+) -> tuple[VideoTask | None, list[str]]:
+    task = await db.get(VideoTask, task_id)
+    segment = await db.get(LongVideoSegment, segment_id)
+    if task is None or segment is None:
+        return None, []
+
+    failure = build_task_failure_info(
+        error,
+        fallback_code="videos.long.segmentFailed",
+        source_hint=TASK_ERROR_SOURCE_MERGE,
+    )
+    segment.status = LONG_VIDEO_SEGMENT_STATUS_FAILED
+    segment.error_code = failure.code
+    segment.error_source = failure.source
+    segment.error_detail = failure.detail
+    segment.error_retryable = failure.retryable
+    segment.error_message = failure.message or failure.code
+    segment.finished_at = datetime.now(timezone.utc)
+    task.provider_task_ids = {
+        "segment_count": segment_count,
+        "completed_segments": completed_segments,
+        "segments": provider_details,
+    }
+    task.error_code = failure.code
+    task.error_source = failure.source
+    task.error_detail = failure.detail
+    task.error_retryable = failure.retryable
+    task.error_message = failure.message or failure.code
+    await db.flush()
+    return await fail_video_task(
+        db,
+        task_id,
+        failure,
+        refund_quota_on_failure=True,
+        preserve_successful_long_segments=True,
+    )
 
 
 async def cleanup_storage_keys_best_effort(keys: list[str]) -> None:
@@ -970,7 +1750,7 @@ async def wait_for_task_execution_turn(db: AsyncSession, task_id: UUID, *, allow
         return task if allow_resume else None
     if settings.VIDEO_PROVIDER_CONCURRENCY_LIMIT <= 0:
         task.status = VIDEO_TASK_STATUS_PROCESSING
-        task.error_message = None
+        clear_task_error_state(task)
         task.processing_started_at = task.processing_started_at or datetime.now(timezone.utc)
         task.finished_at = None
         await db.commit()
@@ -1033,7 +1813,7 @@ async def wait_for_task_execution_turn(db: AsyncSession, task_id: UUID, *, allow
             eligible_ids = list((await db.execute(eligible_stmt)).scalars().all())
             if task.id in eligible_ids:
                 task.status = VIDEO_TASK_STATUS_PROCESSING
-                task.error_message = None
+                clear_task_error_state(task)
                 task.processing_started_at = task.processing_started_at or now
                 task.finished_at = None
                 await db.commit()
@@ -1101,11 +1881,6 @@ async def call_provider_with_resilience(
 
 async def reconcile_stale_video_tasks(*, startup_mode: bool = False) -> int:
     now = datetime.now(timezone.utc)
-    stale_seconds = (
-        settings.VIDEO_TASK_STALE_STARTUP_SECONDS
-        if startup_mode
-        else settings.VIDEO_TASK_STALE_SECONDS
-    )
     stmt = (
         select(VideoTask)
         .where(
@@ -1120,19 +1895,47 @@ async def reconcile_stale_video_tasks(*, startup_mode: bool = False) -> int:
         for task in tasks:
             if task.task_type == VIDEO_TASK_TYPE_LONG and task.status == VIDEO_TASK_STATUS_PROCESSING:
                 failed_segment_stmt = (
-                    select(LongVideoSegment.id)
+                    select(LongVideoSegment)
                     .where(
                         LongVideoSegment.task_id == task.id,
                         LongVideoSegment.status == LONG_VIDEO_SEGMENT_STATUS_FAILED,
                     )
                     .limit(1)
                 )
-                failed_segment_id = (await db.execute(failed_segment_stmt)).scalar_one_or_none()
-                if failed_segment_id is not None:
+                failed_segment = (await db.execute(failed_segment_stmt)).scalar_one_or_none()
+                if failed_segment is not None:
+                    _, cleanup_keys = await fail_video_task(
+                        db,
+                        task.id,
+                        TaskFailureInfo(
+                            code=failed_segment.error_code or "videos.long.segmentFailed",
+                            source=failed_segment.error_source or classify_task_error_source(failed_segment.error_code or "videos.long.segmentFailed"),
+                            detail=failed_segment.error_detail or failed_segment.error_message,
+                            retryable=failed_segment.error_retryable,
+                            message=failed_segment.error_message or failed_segment.error_code or "videos.long.segmentFailed",
+                        ),
+                        refund_quota_on_failure=True,
+                        preserve_successful_long_segments=True,
+                    )
+                    await db.commit()
+                    await cleanup_storage_keys_best_effort(cleanup_keys)
+                    cleaned += 1
                     continue
+            stale_seconds = get_task_stale_seconds(task, startup_mode=startup_mode)
             if not is_task_stale(task.updated_at, now=now, stale_seconds=stale_seconds):
                 continue
-            _, cleanup_keys = await fail_video_task(db, task.id, "视频任务执行超时或中断，请重试。", refund_quota_on_failure=True)
+            _, cleanup_keys = await fail_video_task(
+                db,
+                task.id,
+                TaskFailureInfo(
+                    code="videos.task.executionTimeout",
+                    source=TASK_ERROR_SOURCE_QUEUE,
+                    detail="视频任务执行超时或中断，请重试。",
+                    retryable=True,
+                    message="videos.task.executionTimeout",
+                ),
+                refund_quota_on_failure=True,
+            )
             await db.commit()
             await cleanup_storage_keys_best_effort(cleanup_keys)
             cleaned += 1
@@ -1184,7 +1987,7 @@ async def recover_flex_video_tasks_on_startup() -> int:
         finalize_tasks = list((await db.execute(finalize_stmt)).scalars().all())
         for task in poll_tasks:
             task.next_poll_at = now
-            task.error_message = None
+            clear_task_error_state(task)
             recovered += 1
         await db.commit()
 
@@ -1262,6 +2065,10 @@ def serialize_long_segments(segments: list[LongVideoSegment] | None) -> list[Lon
                 status=segment.status,
                 provider_task_id=segment.provider_task_id,
                 segment_video_key=segment.segment_video_key,
+                error_code=segment.error_code,
+                error_source=segment.error_source,
+                error_detail=segment.error_detail,
+                error_retryable=segment.error_retryable,
                 error_message=segment.error_message,
                 queued_at=segment.queued_at,
                 processing_started_at=segment.processing_started_at,
@@ -1290,6 +2097,14 @@ def to_video_task_out(task: VideoTask, *, long_segments: list[LongVideoSegment] 
         aspect_ratio=task.aspect_ratio,
         duration_seconds=task.duration_seconds,
         logo_key=task.logo_key,
+        logo_position_x=task.logo_position_x,
+        logo_position_y=task.logo_position_y,
+        avatar_key=task.avatar_key,
+        avatar_position=task.avatar_position,
+        avatar_position_x=task.avatar_position_x,
+        avatar_position_y=task.avatar_position_y,
+        profile_card_id=task.profile_card_id,
+        profile_card_data=task.profile_card_data,
         quota_consumed=planned_quota,
         planned_quota_consumed=planned_quota,
         charged_quota_consumed=task.charged_quota_consumed,
@@ -1299,6 +2114,10 @@ def to_video_task_out(task: VideoTask, *, long_segments: list[LongVideoSegment] 
         provider_status=task.provider_status,
         video_key=task.video_key,
         download_url=build_download_url(task),
+        error_code=task.error_code,
+        error_source=task.error_source,
+        error_detail=task.error_detail,
+        error_retryable=task.error_retryable,
         error_message=task.error_message,
         queued_at=task.queued_at,
         processing_started_at=task.processing_started_at,
@@ -1327,6 +2146,15 @@ def to_video_task_list_item(task: VideoTask, *, long_segments: list[LongVideoSeg
         resolution=task.resolution,
         aspect_ratio=task.aspect_ratio,
         duration_seconds=task.duration_seconds,
+        logo_key=task.logo_key,
+        logo_position_x=task.logo_position_x,
+        logo_position_y=task.logo_position_y,
+        avatar_key=task.avatar_key,
+        avatar_position=task.avatar_position,
+        avatar_position_x=task.avatar_position_x,
+        avatar_position_y=task.avatar_position_y,
+        profile_card_id=task.profile_card_id,
+        profile_card_data=task.profile_card_data,
         quota_consumed=planned_quota,
         planned_quota_consumed=planned_quota,
         charged_quota_consumed=task.charged_quota_consumed,
@@ -1335,6 +2163,10 @@ def to_video_task_list_item(task: VideoTask, *, long_segments: list[LongVideoSeg
         provider_status=task.provider_status,
         video_key=task.video_key,
         download_url=build_download_url(task),
+        error_code=task.error_code,
+        error_source=task.error_source,
+        error_detail=task.error_detail,
+        error_retryable=task.error_retryable,
         error_message=task.error_message,
         queued_at=task.queued_at,
         processing_started_at=task.processing_started_at,
@@ -1356,6 +2188,63 @@ def build_download_url(task: VideoTask) -> str | None:
     return f"/api/v1/videos/tasks/{task.id}/download"
 
 
+async def apply_task_video_overlays(task: VideoTask, output_path: Path) -> None:
+    if task.logo_key:
+        logo_path = get_local_path(task.logo_key)
+        if logo_path.exists():
+            await asyncio.to_thread(
+                apply_logo_to_video_file,
+                output_path,
+                logo_path,
+                task.logo_position_x,
+                task.logo_position_y,
+            )
+    if task.avatar_key and task.avatar_position:
+        avatar_path = get_local_path(task.avatar_key)
+        if avatar_path.exists():
+            await asyncio.to_thread(
+                apply_avatar_to_video_file,
+                output_path,
+                avatar_path,
+                task.avatar_position,
+                task.avatar_position_x,
+                task.avatar_position_y,
+            )
+
+
+async def append_profile_card_to_video(task: VideoTask, output_path: Path) -> None:
+    if not task.profile_card_data:
+        return
+
+    ending_key = create_output_key()
+    ending_path = get_local_path(ending_key)
+    merged_path = create_temporary_output_path(output_path)
+    try:
+        await asyncio.to_thread(
+            create_profile_card_video,
+            output_path=ending_path,
+            card_data=task.profile_card_data,
+            resolution=task.resolution,
+            aspect_ratio=task.aspect_ratio,
+            fps=settings.VIDEO_FPS,
+            duration_seconds=2,
+        )
+        await asyncio.to_thread(
+            merge_segment_videos,
+            [output_path, ending_path],
+            merged_path,
+            fps=settings.VIDEO_FPS,
+        )
+        merged_path.replace(output_path)
+    finally:
+        safe_delete_storage_key_task = safe_delete_storage_key(ending_key)
+        try:
+            await safe_delete_storage_key_task
+        except Exception:
+            logger.warning("Failed to delete temporary profile card clip: %s", ending_key, exc_info=True)
+        safe_delete_local_path(merged_path)
+
+
 async def submit_flex_short_video_task(task_id: UUID | str) -> None:
     if isinstance(task_id, str):
         task_id = UUID(task_id)
@@ -1372,10 +2261,9 @@ async def submit_flex_short_video_task(task_id: UUID | str) -> None:
 
             provider = get_async_video_provider()
             image_path = get_local_path(task.image_keys[0])
-            logo_path = get_local_path(task.logo_key) if task.logo_key else None
             now = datetime.now(timezone.utc)
             task.status = VIDEO_TASK_STATUS_SUBMITTING
-            task.error_message = None
+            clear_task_error_state(task)
             task.processing_started_at = task.processing_started_at or now
             task.finished_at = None
             await db.commit()
@@ -1389,7 +2277,7 @@ async def submit_flex_short_video_task(task_id: UUID | str) -> None:
                         resolution=task.resolution,
                         aspect_ratio=task.aspect_ratio,
                         duration_seconds=task.duration_seconds,
-                        logo_path=logo_path,
+                logo_path=None,
                     ),
                     timeout=settings.VIDEO_GENERATE_TIMEOUT_SECONDS,
                 )
@@ -1409,7 +2297,14 @@ async def submit_flex_short_video_task(task_id: UUID | str) -> None:
                 await db.commit()
             except Exception as exc:
                 await db.rollback()
-                _, cleanup_keys = await fail_video_task(db, task_id, str(exc), refund_quota_on_failure=True)
+                _, cleanup_keys = await fail_video_task(
+                    db,
+                    task_id,
+                    exc,
+                    refund_quota_on_failure=True,
+                    fallback_code="videos.provider.unavailable",
+                    source_hint=TASK_ERROR_SOURCE_PROVIDER,
+                )
                 await db.commit()
                 await cleanup_storage_keys_best_effort(cleanup_keys)
 
@@ -1461,7 +2356,7 @@ async def poll_flex_short_video_tasks(*, limit: int | None = None) -> int:
                     snapshot.provider_task_ids,
                     provider_task_id=task.provider_task_id,
                 )
-                task.error_message = None
+                clear_task_error_state(task)
                 if snapshot.status == "succeeded":
                     task.provider_completed_at = current_time
                     task.status = VIDEO_TASK_STATUS_FINALIZING
@@ -1471,7 +2366,13 @@ async def poll_flex_short_video_tasks(*, limit: int | None = None) -> int:
                     _, cleanup_keys = await fail_video_task(
                         db,
                         task.id,
-                        snapshot.error_message or "videos.provider.failed",
+                        TaskFailureInfo(
+                            code="videos.provider.failed",
+                            source=TASK_ERROR_SOURCE_PROVIDER,
+                            detail=snapshot.error_message,
+                            retryable=True,
+                            message="videos.provider.failed",
+                        ),
                         refund_quota_on_failure=True,
                     )
                     await db.commit()
@@ -1494,7 +2395,14 @@ async def poll_flex_short_video_tasks(*, limit: int | None = None) -> int:
                     task.next_poll_at = build_next_flex_poll_at(now=current_time)
                     await db.commit()
                     continue
-                _, cleanup_keys = await fail_video_task(db, task.id, str(exc), refund_quota_on_failure=True)
+                _, cleanup_keys = await fail_video_task(
+                    db,
+                    task.id,
+                    exc,
+                    refund_quota_on_failure=True,
+                    fallback_code="videos.provider.unavailable",
+                    source_hint=TASK_ERROR_SOURCE_PROVIDER,
+                )
                 await db.commit()
                 await cleanup_storage_keys_best_effort(cleanup_keys)
 
@@ -1552,10 +2460,6 @@ async def finalize_flex_short_video_task(task_id: UUID | str) -> None:
                 output_path = get_local_path(output_key)
                 temp_output_path = create_temporary_output_path(output_path)
                 await provider.download_generated_video(snapshot.video_url, temp_output_path)
-                if task.logo_key:
-                    logo_path = get_local_path(task.logo_key)
-                    if logo_path.exists():
-                        await asyncio.to_thread(apply_logo_to_video_file, temp_output_path, logo_path)
                 temp_output_path.replace(output_path)
 
                 task.video_key = output_key
@@ -1565,6 +2469,8 @@ async def finalize_flex_short_video_task(task_id: UUID | str) -> None:
                     snapshot.provider_task_ids,
                     provider_task_id=task.provider_task_id,
                 )
+                await apply_task_video_overlays(task, output_path)
+                await append_profile_card_to_video(task, output_path)
                 await settle_task_quota_charge(db, task)
                 task.status = VIDEO_TASK_STATUS_SUCCEEDED
                 task.finished_at = datetime.now(timezone.utc)
@@ -1572,7 +2478,7 @@ async def finalize_flex_short_video_task(task_id: UUID | str) -> None:
                 await db.commit()
             except Exception as exc:
                 await db.rollback()
-                _, cleanup_keys = await fail_video_task(db, task_id, str(exc), refund_quota_on_failure=True)
+                _, cleanup_keys = await fail_video_task(db, task_id, exc, refund_quota_on_failure=True)
                 await db.commit()
                 if output_key:
                     cleanup_keys.append(output_key)
@@ -1622,6 +2528,8 @@ async def process_short_video_task(task_id: UUID | str) -> None:
                 task.provider_last_polled_at = datetime.now(timezone.utc)
                 task.provider_completed_at = datetime.now(timezone.utc)
                 task.next_poll_at = None
+                await apply_task_video_overlays(task, get_local_path(output_key))
+                await append_profile_card_to_video(task, get_local_path(output_key))
                 await settle_task_quota_charge(db, task)
                 task.status = VIDEO_TASK_STATUS_SUCCEEDED
                 task.finished_at = datetime.now(timezone.utc)
@@ -1629,7 +2537,7 @@ async def process_short_video_task(task_id: UUID | str) -> None:
                 await db.commit()
             except Exception as exc:
                 await db.rollback()
-                _, cleanup_keys = await fail_video_task(db, task_id, str(exc), refund_quota_on_failure=True)
+                _, cleanup_keys = await fail_video_task(db, task_id, exc, refund_quota_on_failure=True)
                 await db.commit()
                 if output_key:
                     cleanup_keys.append(output_key)
@@ -1681,13 +2589,26 @@ async def process_long_video_task(task_id: UUID | str) -> None:
                         continue
 
                     if segment.status == LONG_VIDEO_SEGMENT_STATUS_FAILED:
-                        task.error_message = segment.error_message or f"长视频片段失败：{segment.id}"
                         task.provider_task_ids = {
                             "segment_count": len(segments),
                             "completed_segments": completed_segments,
                             "segments": provider_details,
                         }
+                        _, cleanup_keys = await fail_video_task(
+                            db,
+                            task.id,
+                            TaskFailureInfo(
+                                code=segment.error_code or "videos.long.segmentFailed",
+                                source=segment.error_source or classify_task_error_source(segment.error_code or "videos.long.segmentFailed"),
+                                detail=segment.error_detail or segment.error_message or f"长视频片段失败：{segment.id}",
+                                retryable=segment.error_retryable,
+                                message=segment.error_message or segment.error_code or "videos.long.segmentFailed",
+                            ),
+                            refund_quota_on_failure=True,
+                            preserve_successful_long_segments=True,
+                        )
                         await db.commit()
+                        await cleanup_storage_keys_best_effort(cleanup_keys)
                         return
 
                     existing_provider_task_id = segment.provider_task_id if segment.status == LONG_VIDEO_SEGMENT_STATUS_PROCESSING else None
@@ -1695,7 +2616,7 @@ async def process_long_video_task(task_id: UUID | str) -> None:
                         segment.status = LONG_VIDEO_SEGMENT_STATUS_QUEUED
 
                     segment.status = LONG_VIDEO_SEGMENT_STATUS_PROCESSING
-                    segment.error_message = None
+                    clear_segment_error_state(segment)
                     segment.processing_started_at = segment.processing_started_at or datetime.now(timezone.utc)
                     segment.finished_at = None
                     await heartbeat_long_segment(db, segment)
@@ -1720,20 +2641,17 @@ async def process_long_video_task(task_id: UUID | str) -> None:
                         )
                     except Exception as segment_exc:
                         await db.rollback()
-                        task = await db.get(VideoTask, task_id)
-                        segment = await db.get(LongVideoSegment, segment.id)
-                        if task is None or segment is None:
-                            return
-                        segment.status = LONG_VIDEO_SEGMENT_STATUS_FAILED
-                        segment.error_message = str(segment_exc)
-                        segment.finished_at = datetime.now(timezone.utc)
-                        task.error_message = str(segment_exc)
-                        task.provider_task_ids = {
-                            "segment_count": len(segments),
-                            "completed_segments": completed_segments,
-                            "segments": provider_details,
-                        }
+                        _, cleanup_keys = await fail_long_video_task_due_to_segment_error(
+                            db,
+                            task_id=task_id,
+                            segment_id=segment.id,
+                            error=segment_exc,
+                            segment_count=len(segments),
+                            completed_segments=completed_segments,
+                            provider_details=provider_details,
+                        )
                         await db.commit()
+                        await cleanup_storage_keys_best_effort(cleanup_keys)
                         return
                     segment.segment_video_key = output_key
                     segment.provider_task_id = generated.provider_task_ids.get("provider_task_id") or next(
@@ -1741,7 +2659,7 @@ async def process_long_video_task(task_id: UUID | str) -> None:
                         None,
                     )
                     segment.status = LONG_VIDEO_SEGMENT_STATUS_SUCCEEDED
-                    segment.error_message = None
+                    clear_segment_error_state(segment)
                     segment.finished_at = datetime.now(timezone.utc)
                     segment_keys.append(output_key)
                     completed_segments += 1
@@ -1755,7 +2673,7 @@ async def process_long_video_task(task_id: UUID | str) -> None:
                     await db.commit()
 
                 task.status = VIDEO_TASK_STATUS_MERGING
-                task.error_message = None
+                clear_task_error_state(task)
                 await heartbeat_active_video_task(db, task)
 
                 final_output_key = create_output_key()
@@ -1771,10 +2689,8 @@ async def process_long_video_task(task_id: UUID | str) -> None:
                     timeout=settings.VIDEO_MERGE_TIMEOUT_SECONDS,
                 )
                 temp_output_path.replace(final_output_path)
-                if task.logo_key:
-                    logo_path = get_local_path(task.logo_key)
-                    if logo_path.exists():
-                        await asyncio.to_thread(apply_logo_to_video_file, final_output_path, logo_path)
+                await apply_task_video_overlays(task, final_output_path)
+                await append_profile_card_to_video(task, final_output_path)
 
                 task.video_key = final_output_key
                 await settle_task_quota_charge(db, task)
@@ -1794,9 +2710,11 @@ async def process_long_video_task(task_id: UUID | str) -> None:
                 _, cleanup_keys = await fail_video_task(
                     db,
                     task_id,
-                    str(exc),
+                    exc,
                     refund_quota_on_failure=True,
                     preserve_successful_long_segments=True,
+                    fallback_code="videos.merge.failed",
+                    source_hint=TASK_ERROR_SOURCE_MERGE,
                 )
                 await db.commit()
                 if final_output_key:
@@ -1816,7 +2734,6 @@ async def generate_video_output(
 ) -> tuple[str, object]:
     provider = get_video_provider()
     image_path = get_local_path(image_key)
-    logo_path = get_local_path(logo_key) if logo_key else None
     output_key = create_output_key()
     output_path = get_local_path(output_key)
     temp_output_path = create_temporary_output_path(output_path)
@@ -1830,7 +2747,7 @@ async def generate_video_output(
             resolution=resolution,
             aspect_ratio=aspect_ratio,
             duration_seconds=duration_seconds,
-            logo_path=logo_path,
+            logo_path=None,
         )
         temp_output_path.replace(output_path)
         return output_key, result

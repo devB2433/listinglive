@@ -77,6 +77,8 @@ async def get_my_quota(
     return QuotaSnapshotOut(
         subscription_plan_type=context.subscription_plan_type,
         subscription_status=context.subscription_status,
+        subscription_is_local_trial=context.subscription_is_local_trial,
+        subscription_is_billing_managed=context.subscription_is_billing_managed,
         subscription_cancel_at_period_end=context.subscription_cancel_at_period_end,
         subscription_current_period_end=context.subscription_current_period_end,
         subscription_remaining=context.subscription_remaining,

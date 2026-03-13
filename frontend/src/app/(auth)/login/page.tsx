@@ -8,6 +8,13 @@ import { useLocale } from "@/components/providers/locale-provider";
 import { login } from "@/lib/api";
 import { setStoredTokens } from "@/lib/session";
 
+const AUTOFILL_SAFE_INPUT_PROPS = {
+  autoComplete: "off",
+  "data-lpignore": "true",
+  "data-1p-ignore": "true",
+  "data-bwignore": "true",
+} as const;
+
 function LoginPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -49,6 +56,7 @@ function LoginPageContent() {
               onChange={(e) => setUsernameOrEmail(e.target.value)}
               className="w-full rounded-md border border-gray-300 px-3 py-2"
               required
+              {...AUTOFILL_SAFE_INPUT_PROPS}
             />
           </div>
           <div>
@@ -59,6 +67,7 @@ function LoginPageContent() {
               onChange={(e) => setPassword(e.target.value)}
               className="w-full rounded-md border border-gray-300 px-3 py-2"
               required
+              {...AUTOFILL_SAFE_INPUT_PROPS}
             />
           </div>
           {error && <p className="text-sm text-red-600">{error}</p>}

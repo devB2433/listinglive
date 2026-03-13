@@ -69,20 +69,47 @@ class AuthServiceTests(unittest.IsolatedAsyncioTestCase):
             with patch("backend.services.auth_service.validate_invite_code", AsyncMock(return_value=invite_code)):
                 with patch("backend.services.quota_service.ensure_signup_bonus", AsyncMock()):
                     with patch("backend.services.quota_service.ensure_invite_bonus", AsyncMock()):
-                        user = await register(
-                            db,
-                            redis,
-                            " DemoUser ",
-                            "Password!1",
-                            " Demo@Example.COM ",
-                            "123456",
-                            " invite88 ",
-                        )
+                        with patch("backend.services.quota_service.ensure_signup_pro_trial_subscription", AsyncMock()):
+                            user = await register(
+                                db,
+                                redis,
+                                " DemoUser ",
+                                "Password!1",
+                                " Demo@Example.COM ",
+                                "123456",
+                                " invite88 ",
+                            )
 
         self.assertEqual(user.username, "demouser")
         self.assertEqual(user.email, "demo@example.com")
         self.assertEqual(user.invited_by_code, "INVITE88")
         db.add.assert_called_once()
+
+    async def test_register_creates_signup_pro_trial_subscription(self) -> None:
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[_FakeResult(None), _FakeResult(None)])
+        db.flush = AsyncMock()
+        db.add = Mock()
+        redis = AsyncMock()
+        invite_code = InviteCode(code="INVITE88", owner_user_id=None, created_by_user_id="root-id", is_active=True)
+        ensure_trial = AsyncMock()
+
+        with patch("backend.services.auth_service.verify_code", AsyncMock(return_value=True)):
+            with patch("backend.services.auth_service.validate_invite_code", AsyncMock(return_value=invite_code)):
+                with patch("backend.services.quota_service.ensure_signup_bonus", AsyncMock()):
+                    with patch("backend.services.quota_service.ensure_invite_bonus", AsyncMock()):
+                        with patch("backend.services.quota_service.ensure_signup_pro_trial_subscription", ensure_trial):
+                            user = await register(
+                                db,
+                                redis,
+                                "new-user",
+                                "Password!1",
+                                "new@example.com",
+                                "123456",
+                                "INVITE88",
+                            )
+
+        ensure_trial.assert_awaited_once_with(db, user.id)
 
     async def test_authenticate_user_matches_case_insensitive_identity(self) -> None:
         db = AsyncMock()

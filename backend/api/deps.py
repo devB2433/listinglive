@@ -25,14 +25,14 @@ async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
 ) -> User:
     if not credentials:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="未提供认证信息")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"code": "auth.accessTokenMissing"})
     payload = decode_token(credentials.credentials)
     if not payload or payload.get("type") != "access":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="无效的 token")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"code": "auth.accessTokenInvalid"})
     user_id = UUID(payload["sub"])
     user = await get_user_by_id(db, user_id)
     if not user or not user.is_active():
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户不存在或已禁用")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail={"code": "auth.accessTokenUserUnavailable"})
     return user
 
 

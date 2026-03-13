@@ -91,6 +91,14 @@ class AdminTaskListItemOut(BaseModel):
     queue_wait_seconds: int | None = None
     processing_seconds: int | None = None
     total_elapsed_seconds: int | None = None
+    provider_task_id: str | None = None
+    provider_submitted_at: datetime | None = None
+    provider_last_polled_at: datetime | None = None
+    provider_completed_at: datetime | None = None
+    error_code: str | None = None
+    error_source: str | None = None
+    error_detail: str | None = None
+    error_retryable: bool | None = None
     error_message: str | None = None
     created_at: datetime
 

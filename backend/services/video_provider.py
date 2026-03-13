@@ -7,17 +7,19 @@ import mimetypes
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 import httpx
 import imageio.v2 as imageio
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from volcenginesdkarkruntime import AsyncArk
 
 from backend.core.ai_provider_config import VideoProviderConfig, get_video_provider_config
 from backend.core.config import settings
+from backend.services.storage_service import get_local_path
 
 RESOLUTION_BASE = {
     "480p": 480,
@@ -640,7 +642,46 @@ def get_video_provider() -> VideoProvider:
     raise RuntimeError(f"暂不支持的视频 provider: {provider_config.provider}")
 
 
-def apply_logo_to_frame(frame: Image.Image, logo_path: Path) -> Image.Image:
+def _resolve_overlay_position(
+    frame: Image.Image,
+    overlay: Image.Image,
+    position: str,
+    margin: int = 20,
+) -> tuple[int, int]:
+    if position == "top_left":
+        return margin, margin
+    if position == "top_right":
+        return frame.width - overlay.width - margin, margin
+    if position == "bottom_left":
+        return margin, frame.height - overlay.height - margin
+    return frame.width - overlay.width - margin, frame.height - overlay.height - margin
+
+
+def _resolve_overlay_free_position(
+    frame: Image.Image,
+    overlay: Image.Image,
+    *,
+    position_x: float | None,
+    position_y: float | None,
+    margin: int = 20,
+) -> tuple[int, int] | None:
+    if position_x is None or position_y is None:
+        return None
+    max_x = max(frame.width - overlay.width - margin, margin)
+    max_y = max(frame.height - overlay.height - margin, margin)
+    available_width = max(max_x - margin, 0)
+    available_height = max(max_y - margin, 0)
+    x = int(round(margin + available_width * min(max(position_x, 0.0), 1.0)))
+    y = int(round(margin + available_height * min(max(position_y, 0.0), 1.0)))
+    return x, y
+
+
+def apply_logo_to_frame(
+    frame: Image.Image,
+    logo_path: Path,
+    position_x: float | None = None,
+    position_y: float | None = None,
+) -> Image.Image:
     frame = frame.copy()
     with Image.open(logo_path) as logo_image:
         logo = logo_image.convert("RGBA")
@@ -656,12 +697,23 @@ def apply_logo_to_frame(frame: Image.Image, logo_path: Path) -> Image.Image:
     logo.putalpha(alpha)
 
     margin = 20
-    position = (frame.width - logo.width - margin, frame.height - logo.height - margin)
+    position = _resolve_overlay_free_position(
+        frame,
+        logo,
+        position_x=position_x,
+        position_y=position_y,
+        margin=margin,
+    ) or _resolve_overlay_position(frame, logo, "bottom_right", margin)
     frame.alpha_composite(logo, dest=position)
     return frame
 
 
-def apply_logo_to_video_file(video_path: Path, logo_path: Path) -> None:
+def apply_logo_to_video_file(
+    video_path: Path,
+    logo_path: Path,
+    position_x: float | None = None,
+    position_y: float | None = None,
+) -> None:
     temp_output_path = video_path.with_name(f"{video_path.stem}.logo{video_path.suffix}")
     reader = imageio.get_reader(video_path, format="FFMPEG")
     meta = reader.get_meta_data()
@@ -670,8 +722,546 @@ def apply_logo_to_video_file(video_path: Path, logo_path: Path) -> None:
         with imageio.get_writer(temp_output_path, fps=fps, codec="libx264", format="FFMPEG") as writer:
             for frame in reader:
                 image = Image.fromarray(frame).convert("RGBA")
-                watermarked = apply_logo_to_frame(image, logo_path)
+                watermarked = apply_logo_to_frame(image, logo_path, position_x, position_y)
                 writer.append_data(np.asarray(watermarked.convert("RGB")))
     finally:
         reader.close()
     temp_output_path.replace(video_path)
+
+
+def apply_avatar_to_frame(
+    frame: Image.Image,
+    avatar_path: Path,
+    position: str,
+    position_x: float | None = None,
+    position_y: float | None = None,
+) -> Image.Image:
+    frame = frame.copy()
+    with Image.open(avatar_path) as avatar_image:
+        avatar = avatar_image.convert("RGBA")
+
+    target_width = max(int(frame.width * 0.09), 1)
+    scale = min(target_width / max(avatar.width, 1), 1.0)
+    avatar = avatar.resize(
+        (max(LocalVideoProvider._make_even(int(avatar.width * scale)), 2), max(LocalVideoProvider._make_even(int(avatar.height * scale)), 2)),
+        Image.Resampling.LANCZOS,
+    )
+    position_xy = _resolve_overlay_free_position(
+        frame,
+        avatar,
+        position_x=position_x,
+        position_y=position_y,
+    ) or _resolve_overlay_position(frame, avatar, position)
+    frame.alpha_composite(avatar, dest=position_xy)
+    return frame
+
+
+def apply_avatar_to_video_file(
+    video_path: Path,
+    avatar_path: Path,
+    position: str,
+    position_x: float | None = None,
+    position_y: float | None = None,
+) -> None:
+    temp_output_path = video_path.with_name(f"{video_path.stem}.avatar{video_path.suffix}")
+    reader = imageio.get_reader(video_path, format="FFMPEG")
+    meta = reader.get_meta_data()
+    fps = meta.get("fps") or settings.VIDEO_FPS
+    try:
+        with imageio.get_writer(temp_output_path, fps=fps, codec="libx264", format="FFMPEG") as writer:
+            for frame in reader:
+                image = Image.fromarray(frame).convert("RGBA")
+                with_avatar = apply_avatar_to_frame(image, avatar_path, position, position_x, position_y)
+                writer.append_data(np.asarray(with_avatar.convert("RGB")))
+    finally:
+        reader.close()
+    temp_output_path.replace(video_path)
+
+
+def _load_font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
+    candidates = [
+        "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
+        "arialbd.ttf" if bold else "arial.ttf",
+    ]
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _load_accent_font(size: int) -> ImageFont.ImageFont:
+    candidates = [
+        "Segoe Script.ttf",
+        "segoesc.ttf",
+        "Brush Script MT Italic.ttf",
+        "BRUSHSCI.TTF",
+        "Lucida Handwriting Italic.ttf",
+        "LHANDW.TTF",
+        "Georgia Italic.ttf",
+        "georgiai.ttf",
+        "Times New Roman Italic.ttf",
+        "timesi.ttf",
+        "DejaVuSerif-Italic.ttf",
+    ]
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size)
+        except OSError:
+            continue
+    return _load_font(size)
+
+
+def _measure_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> int:
+    if not text:
+        return 0
+    box = draw.textbbox((0, 0), text, font=font)
+    return max(box[2] - box[0], 0)
+
+
+def _fit_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont, max_width: int) -> str:
+    if _measure_text(draw, text, font) <= max_width:
+        return text
+    candidate = text.rstrip()
+    while candidate and _measure_text(draw, f"{candidate}...", font) > max_width:
+        candidate = candidate[:-1]
+    return f"{candidate.rstrip()}..." if candidate else "..."
+
+
+def _wrap_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.ImageFont,
+    *,
+    max_width: int,
+    max_lines: int = 2,
+) -> list[str]:
+    value = str(text or "").strip()
+    if not value:
+        return []
+
+    parts = value.split()
+    tokens = parts if len(parts) > 1 else list(value)
+    joiner = " " if len(parts) > 1 else ""
+    lines: list[str] = []
+    current = ""
+
+    for token in tokens:
+        candidate = f"{current}{joiner if current else ''}{token}"
+        if not current or _measure_text(draw, candidate, font) <= max_width:
+            current = candidate
+            continue
+
+        lines.append(current)
+        if len(lines) >= max_lines:
+            lines[-1] = _fit_text(draw, lines[-1], font, max_width)
+            return lines
+        current = token
+
+    if current:
+        lines.append(current)
+
+    if len(lines) > max_lines:
+        lines = lines[:max_lines]
+
+    if len(lines) == max_lines and tokens:
+        consumed = joiner.join(lines).replace("...", "").strip()
+        if consumed != value:
+            lines[-1] = _fit_text(draw, lines[-1], font, max_width)
+    return lines
+
+
+def _draw_lines(
+    draw: ImageDraw.ImageDraw,
+    *,
+    x: int,
+    y: int,
+    lines: list[str],
+    font: ImageFont.ImageFont,
+    fill: tuple[int, int, int, int],
+    line_gap: int,
+) -> int:
+    current_y = y
+    for line in lines:
+        draw.text((x, current_y), line, fill=fill, font=font)
+        box = draw.textbbox((x, current_y), line, font=font)
+        current_y = box[3] + line_gap
+    return current_y
+
+
+def _load_asset_image(asset_key: str | None) -> Image.Image | None:
+    if not asset_key:
+        return None
+    asset_path = get_local_path(str(asset_key))
+    if not asset_path.exists():
+        return None
+    with Image.open(asset_path) as asset_image:
+        return asset_image.convert("RGBA")
+
+
+def _resize_to_fit(image: Image.Image, *, max_width: int, max_height: int) -> Image.Image:
+    scale = min(max_width / max(image.width, 1), max_height / max(image.height, 1), 1.0)
+    return image.resize((max(int(image.width * scale), 1), max(int(image.height * scale), 1)), Image.Resampling.LANCZOS)
+
+
+def _draw_contact_chips(
+    image: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    *,
+    start_x: int,
+    start_y: int,
+    max_width: int,
+    entries: list[str],
+    font: ImageFont.ImageFont,
+    fill: tuple[int, int, int, int],
+    chip_fill: tuple[int, int, int, int],
+) -> int:
+    cursor_x = start_x
+    cursor_y = start_y
+    chip_gap = 14
+    row_gap = 14
+
+    for entry in entries:
+        if not entry:
+            continue
+        content = _fit_text(draw, entry, font, max_width=max_width - 36)
+        box = draw.textbbox((0, 0), content, font=font)
+        chip_width = min(max_width, max(box[2] - box[0] + 28, 100))
+        chip_height = max(box[3] - box[1] + 18, 34)
+        if cursor_x + chip_width > start_x + max_width:
+            cursor_x = start_x
+            cursor_y += chip_height + row_gap
+        draw.rounded_rectangle((cursor_x, cursor_y, cursor_x + chip_width, cursor_y + chip_height), radius=chip_height // 2, fill=chip_fill)
+        draw.text((cursor_x + 14, cursor_y + 9), content, fill=fill, font=font)
+        cursor_x += chip_width + chip_gap
+    return cursor_y
+
+
+def _draw_profile_card_clean_light(
+    *,
+    width: int,
+    height: int,
+    card_data: dict[str, Any],
+) -> Image.Image:
+    image = Image.new("RGBA", (width, height), (244, 247, 251, 255))
+    draw = ImageDraw.Draw(image)
+    panel_margin_x = max(int(width * 0.055), 48)
+    panel_margin_y = max(int(height * 0.1), 54)
+    panel = (panel_margin_x, panel_margin_y, width - panel_margin_x, height - panel_margin_y)
+    draw.rounded_rectangle(panel, radius=34, fill=(255, 255, 255, 255))
+    accent_width = max(int((panel[2] - panel[0]) * 0.28), 180)
+    draw.rounded_rectangle((panel[0], panel[1], panel[0] + accent_width, panel[1] + 18), radius=18, fill=(37, 99, 235, 255))
+
+    avatar = _load_asset_image(card_data.get("avatar_key") if card_data.get("include_avatar") else None)
+    logo = _load_asset_image(card_data.get("logo_key") if card_data.get("include_logo") else None)
+    title_font = _load_font(max(int(height * 0.1), 38), bold=True)
+    body_font = _load_font(max(int(height * 0.048), 20))
+    caption_font = _load_font(max(int(height * 0.04), 18))
+
+    content_x = panel[0] + 48
+    content_y = panel[1] + 54
+    text_x = content_x
+    if avatar is not None:
+        avatar = _resize_to_fit(avatar, max_width=120, max_height=120)
+        avatar_y = content_y + 10
+        image.alpha_composite(avatar, dest=(content_x, avatar_y))
+        text_x = content_x + avatar.width + 34
+
+    if logo is not None:
+        logo = _resize_to_fit(logo, max_width=max(int(width * 0.16), 110), max_height=72)
+        image.alpha_composite(logo, dest=(panel[2] - logo.width - 34, panel[1] + 38))
+
+    current_y = content_y
+    if card_data.get("include_name"):
+        name_lines = _wrap_text(draw, str(card_data.get("full_name") or ""), title_font, max_width=panel[2] - text_x - 48, max_lines=2)
+        current_y = _draw_lines(draw, x=text_x, y=current_y, lines=name_lines, font=title_font, fill=(15, 23, 42, 255), line_gap=8)
+    if card_data.get("include_brokerage_name"):
+        brokerage_lines = _wrap_text(draw, str(card_data.get("brokerage_name") or ""), body_font, max_width=panel[2] - text_x - 48, max_lines=1)
+        current_y = _draw_lines(draw, x=text_x, y=current_y + 4, lines=brokerage_lines, font=body_font, fill=(37, 99, 235, 255), line_gap=8)
+
+    details: list[str] = []
+    if card_data.get("include_phone"):
+        details.append(str(card_data.get("phone") or ""))
+    if card_data.get("include_address"):
+        details.append(str(card_data.get("contact_address") or ""))
+    _draw_contact_chips(
+        image,
+        draw,
+        start_x=content_x,
+        start_y=max(current_y + 28, panel[1] + 180),
+        max_width=panel[2] - content_x - 40,
+        entries=details,
+        font=caption_font,
+        fill=(51, 65, 85, 255),
+        chip_fill=(239, 246, 255, 255),
+    )
+    return image
+
+
+def _draw_profile_card_brand_dark(
+    *,
+    width: int,
+    height: int,
+    card_data: dict[str, Any],
+) -> Image.Image:
+    bg = (35, 37, 54, 255)
+    gold = (232, 164, 44, 255)
+    white = (242, 242, 244, 255)
+    image = Image.new("RGBA", (width, height), bg)
+    draw = ImageDraw.Draw(image)
+    border_margin = max(int(width * 0.035), 28)
+    draw.rectangle((border_margin, border_margin, width - border_margin, height - border_margin), outline=gold, width=5)
+
+    avatar = _load_asset_image(card_data.get("avatar_key") if card_data.get("include_avatar") else None)
+    title_font = _load_font(max(int(height * 0.11), 42), bold=True)
+    subtitle_font = _load_font(max(int(height * 0.05), 21), bold=True)
+    slogan_font = _load_accent_font(max(int(height * 0.05), 21))
+    body_font = _load_font(max(int(height * 0.048), 19))
+
+    content_left = border_margin + max(int(width * 0.035), 28)
+    top_y = border_margin + max(int(height * 0.05), 18)
+    right_limit = width - border_margin - max(int(width * 0.035), 28)
+    avatar_size = max(int(width * 0.12), 86)
+    avatar_slot_x = right_limit - avatar_size
+    text_limit = avatar_slot_x - content_left - max(int(width * 0.04), 20)
+
+    current_y = top_y
+    if card_data.get("include_name"):
+        name_lines = _wrap_text(draw, str(card_data.get("full_name") or "").upper(), title_font, max_width=text_limit, max_lines=2)
+        current_y = _draw_lines(draw, x=content_left, y=current_y, lines=name_lines, font=title_font, fill=white, line_gap=6)
+
+    brokerage_text = str(card_data.get("brokerage_name") or "").strip()
+    if brokerage_text:
+        brokerage = _fit_text(draw, brokerage_text.upper(), subtitle_font, max_width=text_limit)
+        brokerage_box = draw.textbbox((0, 0), brokerage, font=subtitle_font)
+        brokerage_y = current_y + 8
+        draw.text((content_left, brokerage_y), brokerage, fill=gold, font=subtitle_font)
+        current_y = brokerage_y + (brokerage_box[3] - brokerage_box[1])
+
+    slogan_text = str(card_data.get("slogan") or "").strip()
+    if avatar is not None:
+        avatar = _resize_to_fit(avatar, max_width=avatar_size, max_height=avatar_size)
+        avatar_frame = Image.new("RGBA", (avatar_size + 18, avatar_size + 18), (255, 255, 255, 0))
+        avatar_frame_draw = ImageDraw.Draw(avatar_frame)
+        avatar_frame_draw.ellipse((0, 0, avatar_frame.width - 1, avatar_frame.height - 1), outline=gold, width=3, fill=(255, 255, 255, 10))
+        avatar_frame.alpha_composite(avatar, dest=((avatar_frame.width - avatar.width) // 2, (avatar_frame.height - avatar.height) // 2))
+        image.alpha_composite(avatar_frame, dest=(avatar_slot_x - 9, top_y + 8))
+
+    divider_y = height - border_margin - max(int(height * 0.25), 132)
+    draw.line((content_left, divider_y, right_limit - max(int(width * 0.06), 34), divider_y), fill=gold, width=3)
+
+    if slogan_text:
+        slogan_lines = _wrap_text(
+            draw,
+            slogan_text,
+            slogan_font,
+            max_width=max(text_limit + max(int(width * 0.06), 40), text_limit),
+            max_lines=2,
+        )
+        slogan_y = min(
+            max(current_y + max(int(height * 0.075), 34), top_y + max(int(height * 0.22), 90)),
+            divider_y - max(int(height * 0.12), 52),
+        )
+        _draw_lines(
+            draw,
+            x=content_left,
+            y=slogan_y,
+            lines=slogan_lines,
+            font=slogan_font,
+            fill=(233, 223, 200, 235),
+            line_gap=8,
+        )
+
+    icon_size = max(int(height * 0.064), 28)
+    row_gap = max(int(height * 0.032), 14)
+    col_gap = max(int(width * 0.08), 60)
+    left_col_x = content_left
+    right_col_x = content_left + max(int(width * 0.33), 250)
+    row_1_y = divider_y + max(int(height * 0.045), 18)
+    row_2_y = row_1_y + icon_size + row_gap
+
+    def draw_contact_icon(x: int, y: int, kind: str) -> None:
+        draw.rectangle((x, y, x + icon_size, y + icon_size), fill=gold)
+        cx = x + icon_size / 2
+        cy = y + icon_size / 2
+        stroke = max(icon_size // 10, 2)
+        fg = bg
+        if kind == "phone":
+            draw.arc((x + 6, y + 6, x + icon_size - 10, y + icon_size - 2), start=120, end=240, fill=fg, width=stroke)
+            draw.arc((x + 10, y + 2, x + icon_size - 6, y + icon_size - 10), start=300, end=60, fill=fg, width=stroke)
+            draw.line((x + 11, y + icon_size - 10, x + 17, y + icon_size - 5), fill=fg, width=stroke)
+            draw.line((x + icon_size - 17, y + 5, x + icon_size - 11, y + 10), fill=fg, width=stroke)
+        elif kind == "address":
+            draw.ellipse((cx - icon_size * 0.18, y + 7, cx + icon_size * 0.18, y + 7 + icon_size * 0.36), outline=fg, width=stroke)
+            draw.polygon([(cx, y + icon_size - 7), (cx - icon_size * 0.18, y + icon_size * 0.5), (cx + icon_size * 0.18, y + icon_size * 0.5)], outline=fg, fill=None)
+            draw.ellipse((cx - icon_size * 0.05, y + icon_size * 0.28, cx + icon_size * 0.05, y + icon_size * 0.38), fill=fg)
+        elif kind == "homepage":
+            draw.ellipse((x + 6, y + 6, x + icon_size - 6, y + icon_size - 6), outline=fg, width=stroke)
+            draw.arc((x + 8, y + 11, x + icon_size - 8, y + icon_size - 11), start=0, end=180, fill=fg, width=max(stroke - 1, 1))
+            draw.arc((x + 8, y + 11, x + icon_size - 8, y + icon_size - 11), start=180, end=360, fill=fg, width=max(stroke - 1, 1))
+            draw.line((cx, y + 7, cx, y + icon_size - 7), fill=fg, width=max(stroke - 1, 1))
+            draw.line((x + 9, cy, x + icon_size - 9, cy), fill=fg, width=max(stroke - 1, 1))
+        else:
+            draw.rectangle((x + 6, y + 10, x + icon_size - 6, y + icon_size - 10), outline=fg, width=stroke)
+            draw.line((x + 6, y + 10, cx, cy + 2), fill=fg, width=max(stroke - 1, 1))
+            draw.line((x + icon_size - 6, y + 10, cx, cy + 2), fill=fg, width=max(stroke - 1, 1))
+
+    def draw_contact_item(x: int, y: int, kind: str, value: str) -> None:
+        if not value.strip():
+            return
+        draw_contact_icon(x, y, kind)
+        draw.text(
+            (x + icon_size + 14, y + 2),
+            _fit_text(draw, value, body_font, max_width=max(int(width * 0.26), 180)),
+            fill=white,
+            font=body_font,
+        )
+
+    draw_contact_item(left_col_x, row_1_y, "phone", str(card_data.get("phone") or ""))
+    draw_contact_item(left_col_x, row_2_y, "address", str(card_data.get("contact_address") or ""))
+    draw_contact_item(right_col_x, row_1_y, "homepage", str(card_data.get("homepage") or ""))
+    draw_contact_item(right_col_x, row_2_y, "email", str(card_data.get("email") or ""))
+
+    building_width = max(int(width * 0.2), 150)
+    building_height = max(int(height * 0.34), 120)
+    building_left = width - border_margin - building_width - max(int(width * 0.012), 8)
+    building_bottom = height - border_margin + 1
+    roof_peak_x = building_left + building_width * 0.5
+    roof_peak_y = building_bottom - building_height - max(int(height * 0.02), 12)
+    outline_points = [
+        (building_left, building_bottom),
+        (building_left, building_bottom - building_height * 0.58),
+        (building_left + building_width * 0.18, building_bottom - building_height * 0.72),
+        (building_left + building_width * 0.18, building_bottom - building_height * 0.88),
+        (roof_peak_x, roof_peak_y),
+        (building_left + building_width * 0.82, building_bottom - building_height * 0.88),
+        (building_left + building_width * 0.82, building_bottom - building_height * 0.72),
+        (building_left + building_width, building_bottom - building_height * 0.58),
+        (building_left + building_width, building_bottom),
+    ]
+    draw.line(outline_points, fill=gold, width=4, joint="curve")
+    for index in range(7):
+        line_x = int(building_left + building_width * 0.16 + index * building_width * 0.09)
+        top = int(building_bottom - building_height * (0.82 if index % 2 == 0 else 0.74))
+        draw.line((line_x, building_bottom - 4, line_x, top), fill=white, width=3)
+
+    return image
+
+
+def _draw_profile_card_agent_focus(
+    *,
+    width: int,
+    height: int,
+    card_data: dict[str, Any],
+) -> Image.Image:
+    image = Image.new("RGBA", (width, height), (249, 250, 251, 255))
+    draw = ImageDraw.Draw(image)
+    outer_margin_x = max(int(width * 0.06), 52)
+    outer_margin_y = max(int(height * 0.12), 58)
+    card = (outer_margin_x, outer_margin_y, width - outer_margin_x, height - outer_margin_y)
+    draw.rounded_rectangle(card, radius=34, fill=(255, 255, 255, 255))
+
+    left_panel_width = max(int((card[2] - card[0]) * 0.32), 220)
+    left_panel = (card[0], card[1], card[0] + left_panel_width, card[3])
+    draw.rounded_rectangle(left_panel, radius=34, fill=(30, 64, 175, 255))
+
+    avatar = _load_asset_image(card_data.get("avatar_key") if card_data.get("include_avatar") else None)
+    logo = _load_asset_image(card_data.get("logo_key") if card_data.get("include_logo") else None)
+    title_font = _load_font(max(int(height * 0.098), 38), bold=True)
+    body_font = _load_font(max(int(height * 0.046), 20))
+    caption_font = _load_font(max(int(height * 0.038), 18))
+
+    if avatar is not None:
+        avatar = _resize_to_fit(avatar, max_width=150, max_height=150)
+        avatar_x = left_panel[0] + (left_panel_width - avatar.width) // 2
+        avatar_y = left_panel[1] + 48
+        image.alpha_composite(avatar, dest=(avatar_x, avatar_y))
+        draw.text((left_panel[0] + 34, avatar_y + avatar.height + 30), "Contact your agent", fill=(219, 234, 254, 255), font=caption_font)
+    else:
+        draw.text((left_panel[0] + 34, left_panel[1] + 54), "Listing agent", fill=(219, 234, 254, 255), font=caption_font)
+
+    if logo is not None:
+        logo = _resize_to_fit(logo, max_width=max(int(width * 0.14), 100), max_height=68)
+        image.alpha_composite(logo, dest=(card[2] - logo.width - 38, card[1] + 36))
+
+    text_x = left_panel[2] + 40
+    current_y = card[1] + 58
+    if card_data.get("include_name"):
+        name_lines = _wrap_text(draw, str(card_data.get("full_name") or ""), title_font, max_width=card[2] - text_x - 42, max_lines=2)
+        current_y = _draw_lines(draw, x=text_x, y=current_y, lines=name_lines, font=title_font, fill=(17, 24, 39, 255), line_gap=8)
+    if card_data.get("include_brokerage_name"):
+        brokerage_lines = _wrap_text(draw, str(card_data.get("brokerage_name") or ""), body_font, max_width=card[2] - text_x - 42, max_lines=2)
+        current_y = _draw_lines(draw, x=text_x, y=current_y + 8, lines=brokerage_lines, font=body_font, fill=(37, 99, 235, 255), line_gap=6)
+
+    details: list[str] = []
+    if card_data.get("include_phone"):
+        details.append(str(card_data.get("phone") or ""))
+    if card_data.get("include_address"):
+        details.append(str(card_data.get("contact_address") or ""))
+
+    section_y = current_y + 28
+    for detail in details:
+        detail_lines = _wrap_text(draw, detail, body_font, max_width=card[2] - text_x - 42, max_lines=2)
+        detail_height = max(len(detail_lines), 1) * 34 + 26
+        draw.rounded_rectangle((text_x, section_y, card[2] - 36, section_y + detail_height), radius=24, fill=(241, 245, 249, 255))
+        section_y = _draw_lines(draw, x=text_x + 18, y=section_y + 14, lines=detail_lines, font=body_font, fill=(51, 65, 85, 255), line_gap=6) + 14
+    return image
+
+
+def _get_video_canvas_size(resolution: str, aspect_ratio: str) -> tuple[int, int]:
+    base = RESOLUTION_BASE[resolution]
+    ratio_width, ratio_height = ASPECT_RATIO_MAP["16:9" if aspect_ratio == "adaptive" else aspect_ratio]
+    if ratio_width >= ratio_height:
+        height = base
+        width = int(base * ratio_width / ratio_height)
+    else:
+        width = base
+        height = int(base * ratio_height / ratio_width)
+    return LocalVideoProvider._make_macroblock(width), LocalVideoProvider._make_macroblock(height)
+
+
+def _draw_profile_card_frame(
+    *,
+    width: int,
+    height: int,
+    card_data: dict[str, Any],
+) -> Image.Image:
+    template_key = str(card_data.get("template_key") or "clean_light")
+    if template_key == "brand_dark":
+        return _draw_profile_card_brand_dark(width=width, height=height, card_data=card_data)
+    if template_key == "agent_focus":
+        return _draw_profile_card_agent_focus(width=width, height=height, card_data=card_data)
+    return _draw_profile_card_clean_light(width=width, height=height, card_data=card_data)
+
+
+def create_profile_card_video(
+    *,
+    output_path: Path,
+    card_data: dict[str, Any],
+    resolution: str,
+    aspect_ratio: str,
+    fps: int,
+    duration_seconds: int = 2,
+) -> None:
+    width, height = _get_video_canvas_size(resolution, aspect_ratio)
+    frame = _draw_profile_card_frame(width=width, height=height, card_data=card_data)
+    frame_count = max(duration_seconds * fps, 1)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with imageio.get_writer(output_path, fps=fps, codec="libx264", format="FFMPEG") as writer:
+        rgb_frame = np.asarray(frame.convert("RGB"))
+        for _ in range(frame_count):
+            writer.append_data(rgb_frame)
+
+
+def render_profile_card_preview_bytes(
+    *,
+    card_data: dict[str, Any],
+    resolution: str = "1080p",
+    aspect_ratio: str = "16:9",
+) -> bytes:
+    width, height = _get_video_canvas_size(resolution, aspect_ratio)
+    frame = _draw_profile_card_frame(width=width, height=height, card_data=card_data)
+    output = BytesIO()
+    frame.save(output, format="PNG")
+    return output.getvalue()

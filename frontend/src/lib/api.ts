@@ -105,7 +105,7 @@ export type AdminUserListItem = {
   email: string;
   email_verified: boolean;
   preferred_language: "zh-CN" | "en";
-  status: string;
+  status: "active" | "blocked" | "archived";
   invited_by_code?: string | null;
   created_at: string;
 };
@@ -623,6 +623,15 @@ export async function blockAdminUser(accessToken: string, userId: string) {
 
 export async function unblockAdminUser(accessToken: string, userId: string) {
   const res = await authFetch(`${PREFIX}/admin/users/${userId}/unblock`, {
+    method: "POST",
+    headers: authHeaders(accessToken),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<AdminUserListItem>;
+}
+
+export async function archiveAdminUser(accessToken: string, userId: string) {
+  const res = await authFetch(`${PREFIX}/admin/users/${userId}/archive`, {
     method: "POST",
     headers: authHeaders(accessToken),
   });

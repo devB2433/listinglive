@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useAdminSession } from "@/components/providers/admin-session-provider";
 import { useLocale } from "@/components/providers/locale-provider";
 import {
+  archiveAdminUser,
   blockAdminUser,
   getAdminUsers,
   resetAdminUserPassword,
@@ -79,6 +80,32 @@ export default function AdminUsersPage() {
     }
   }
 
+  async function handleArchive(user: AdminUserListItem) {
+    const confirmed = window.confirm(
+      translate("admin.users.confirmArchiveMessage", {
+        username: user.username,
+        email: user.email,
+      }),
+    );
+    if (!confirmed) return;
+
+    setActionLoading(`archive:${user.id}`);
+    try {
+      await archiveAdminUser(accessToken, user.id);
+      await loadUsers(page);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : translate("common.requestFailed"));
+    } finally {
+      setActionLoading("");
+    }
+  }
+
+  function renderStatusLabel(statusValue: AdminUserListItem["status"]) {
+    if (statusValue === "blocked") return translate("admin.users.statusBlocked");
+    if (statusValue === "archived") return translate("admin.users.statusArchived");
+    return translate("admin.users.statusActive");
+  }
+
   const total = data?.total ?? 0;
   const hasPrev = page > 1;
   const hasNext = page * PAGE_SIZE < total;
@@ -97,6 +124,7 @@ export default function AdminUsersPage() {
             <option value="">{translate("admin.users.allStatuses")}</option>
             <option value="active">{translate("admin.users.statusActive")}</option>
             <option value="blocked">{translate("admin.users.statusBlocked")}</option>
+            <option value="archived">{translate("admin.users.statusArchived")}</option>
           </select>
           <button
             type="button"
@@ -128,7 +156,7 @@ export default function AdminUsersPage() {
                 <tr key={user.id} className="border-t">
                   <td className="px-3 py-2 text-gray-900">{user.username}</td>
                   <td className="px-3 py-2 text-gray-700">{user.email}</td>
-                  <td className="px-3 py-2 text-gray-700">{user.status}</td>
+                  <td className="px-3 py-2 text-gray-700">{renderStatusLabel(user.status)}</td>
                   <td className="px-3 py-2 text-gray-700">{user.email_verified ? translate("common.yes") : translate("common.no")}</td>
                   <td className="px-3 py-2 text-gray-700">{user.invited_by_code ?? "-"}</td>
                   <td className="px-3 py-2 text-gray-700">{formatDate(user.created_at)}</td>
@@ -143,7 +171,8 @@ export default function AdminUsersPage() {
                         >
                           {translate("admin.users.unblock")}
                         </button>
-                      ) : (
+                      ) : null}
+                      {user.status === "active" ? (
                         <button
                           type="button"
                           onClick={() => void handleBlock(user)}
@@ -152,15 +181,27 @@ export default function AdminUsersPage() {
                         >
                           {translate("admin.users.block")}
                         </button>
-                      )}
-                      <button
-                        type="button"
-                        onClick={() => void handleResetPassword(user)}
-                        disabled={actionLoading === `reset:${user.id}`}
-                        className="rounded-md border px-3 py-1 text-xs text-blue-600 hover:bg-blue-50 disabled:opacity-60"
-                      >
-                        {translate("admin.users.resetPassword")}
-                      </button>
+                      ) : null}
+                      {user.status !== "archived" ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => void handleResetPassword(user)}
+                            disabled={actionLoading === `reset:${user.id}`}
+                            className="rounded-md border px-3 py-1 text-xs text-blue-600 hover:bg-blue-50 disabled:opacity-60"
+                          >
+                            {translate("admin.users.resetPassword")}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleArchive(user)}
+                            disabled={actionLoading === `archive:${user.id}`}
+                            className="rounded-md border px-3 py-1 text-xs text-amber-700 hover:bg-amber-50 disabled:opacity-60"
+                          >
+                            {translate("admin.users.archive")}
+                          </button>
+                        </>
+                      ) : null}
                     </div>
                   </td>
                 </tr>

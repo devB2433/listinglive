@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.api_errors import AppError
 from backend.core.config import settings
-from backend.models.user import User
+from backend.models.user import User, UserStatus
 from backend.services.email_service import send_verification_code_email
 from backend.services.invite_code_service import mark_invite_code_used, normalize_invite_code, validate_invite_code
 
@@ -30,6 +30,10 @@ def _normalize_auth_identity(value: str) -> str:
 def _hash_password(password: str) -> str:
     rounds = 4 if settings.DEBUG else 12
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=rounds)).decode("utf-8")
+
+
+def _exclude_archived_users(stmt):
+    return stmt.where(User.status != UserStatus.ARCHIVED.value)
 
 
 def _verify_password(password: str, password_hash: str) -> bool:
@@ -114,10 +118,10 @@ async def register(
     if not await verify_code(redis, email, code):
         raise AppError("auth.register.invalidCode")
     _validate_password_strength(password)
-    username_result = await db.execute(select(User).where(func.lower(User.username) == username))
+    username_result = await db.execute(_exclude_archived_users(select(User).where(func.lower(User.username) == username)))
     if username_result.scalar_one_or_none():
         raise AppError("auth.register.usernameExists")
-    email_result = await db.execute(select(User).where(func.lower(User.email) == email))
+    email_result = await db.execute(_exclude_archived_users(select(User).where(func.lower(User.email) == email)))
     if email_result.scalar_one_or_none():
         raise AppError("auth.register.emailExists")
     valid_invite_code = await validate_invite_code(db, invite_code)
@@ -158,6 +162,7 @@ async def authenticate_user(
     stmt = select(User).where(
         (func.lower(User.username) == normalized_identity) | (func.lower(User.email) == normalized_identity)
     )
+    stmt = _exclude_archived_users(stmt)
     result = await db.execute(stmt)
     user = result.scalar_one_or_none()
     if not user or not user.is_active():
@@ -182,7 +187,7 @@ async def reset_password(
     email = _normalize_auth_identity(email)
     if not await verify_code(redis, email, code):
         raise AppError("auth.resetPassword.invalidCode")
-    result = await db.execute(select(User).where(func.lower(User.email) == email))
+    result = await db.execute(_exclude_archived_users(select(User).where(func.lower(User.email) == email)))
     user = result.scalar_one_or_none()
     if not user or not user.is_active():
         raise AppError("auth.resetPassword.userNotFound", status_code=404)

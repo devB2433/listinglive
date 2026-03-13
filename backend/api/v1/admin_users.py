@@ -10,7 +10,14 @@ from backend.api.deps import get_db, require_root_user
 from backend.core.api_errors import AppError
 from backend.models.user import User
 from backend.schemas.admin import AdminResetUserPasswordRequest, AdminUserListItemOut, AdminUserListOut
-from backend.services.admin_user_service import admin_reset_user_password, block_user, get_admin_user_or_404, list_admin_users, unblock_user
+from backend.services.admin_user_service import (
+    admin_reset_user_password,
+    archive_user,
+    block_user,
+    get_admin_user_or_404,
+    list_admin_users,
+    unblock_user,
+)
 
 router = APIRouter()
 
@@ -89,6 +96,21 @@ async def reset_admin_user_password(
     _ = current_user
     try:
         user = await admin_reset_user_password(db, user_id, new_password=body.new_password)
+        await db.commit()
+        return AdminUserListItemOut.model_validate(user)
+    except AppError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+
+
+@router.post("/{user_id}/archive", response_model=AdminUserListItemOut)
+async def archive_admin_user(
+    user_id: UUID,
+    current_user: User = Depends(require_root_user),
+    db: AsyncSession = Depends(get_db),
+) -> AdminUserListItemOut:
+    try:
+        user = await archive_user(db, user_id=user_id, archived_by_user_id=current_user.id)
         await db.commit()
         return AdminUserListItemOut.model_validate(user)
     except AppError as exc:

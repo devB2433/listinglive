@@ -184,6 +184,16 @@ const messages = {
       login: "登录",
       register: "注册",
     },
+    blog: {
+      navTitle: "文章",
+      sectionTitle: "博客",
+      otherArticles: "其他文章",
+      readMore: "阅读全文",
+      fromTheBlogKicker: "博客",
+      fromTheBlogTitle: "最新更新",
+      heatmapHasPost: "有文章",
+      heatmapNoPost: "无",
+    },
     auth: {
       login: {
         title: "ListingLive 登录",
@@ -1255,6 +1265,16 @@ const messages = {
       },
       login: "Log in",
       register: "Sign up",
+    },
+    blog: {
+      navTitle: "Blog",
+      sectionTitle: "Blog",
+      otherArticles: "Other articles",
+      readMore: "Read more",
+      fromTheBlogKicker: "From the blog",
+      fromTheBlogTitle: "Latest update",
+      heatmapHasPost: "has post",
+      heatmapNoPost: "no post",
     },
     auth: {
       login: {

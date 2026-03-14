@@ -3,6 +3,7 @@
 import Link from "next/link";
 
 import { useLocale } from "@/components/providers/locale-provider";
+import { getLatestPost } from "@/lib/blog-posts-meta";
 
 type ValueCard = {
   metric: string;
@@ -133,29 +134,47 @@ export default function HomePage() {
           <p className="text-lg font-semibold tracking-tight text-slate-950">{translate("common.brand")}</p>
           <p className="text-sm text-slate-600">{translate("home.tagline")}</p>
         </div>
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2">
-            {(["zh-CN", "en"] as const).map((value) => (
-              <button
-                key={value}
-                type="button"
-                onClick={() => setLocale(value)}
-                className={`rounded-full px-3 py-1 text-sm ${
-                  locale === value
-                    ? "border border-slate-900 bg-slate-950 text-white shadow-[0_10px_30px_rgba(15,23,42,0.18)]"
-                    : "border border-slate-300/90 bg-white/70 text-slate-600 backdrop-blur hover:border-blue-300 hover:text-slate-800"
-                }`}
-              >
-                {value === "zh-CN" ? translate("common.chinese") : translate("common.english")}
-              </button>
-            ))}
-          </div>
+        <div className="flex items-center gap-4">
+          <Link
+            href="/blog"
+            className="rounded-full bg-blue-500 px-4 py-2.5 text-sm font-medium text-white shadow-[0_2px_8px_rgba(59,130,246,0.4)] transition hover:bg-blue-600 hover:shadow-[0_4px_12px_rgba(59,130,246,0.45)]"
+          >
+            {translate("blog.navTitle")}
+          </Link>
           <Link
             href="/login"
-            className="rounded-full border border-slate-300/90 bg-white/70 px-4 py-2 text-sm text-slate-700 backdrop-blur transition hover:border-blue-300 hover:bg-white"
+            className="rounded-full bg-blue-500 px-4 py-2.5 text-sm font-medium text-white shadow-[0_2px_8px_rgba(59,130,246,0.4)] transition hover:bg-blue-600 hover:shadow-[0_4px_12px_rgba(59,130,246,0.45)]"
           >
             {translate("home.login")}
           </Link>
+          <div
+            className="flex rounded-full border border-slate-300/90 bg-white/80 p-0.5 shadow-sm backdrop-blur"
+            role="group"
+            aria-label="Language"
+          >
+            <button
+              type="button"
+              onClick={() => setLocale("en")}
+              className={`rounded-full px-3.5 py-1.5 text-sm font-medium transition ${
+                locale === "en"
+                  ? "bg-emerald-600 text-white shadow-sm"
+                  : "text-slate-600 hover:text-slate-800"
+              }`}
+            >
+              {translate("common.english")}
+            </button>
+            <button
+              type="button"
+              onClick={() => setLocale("zh-CN")}
+              className={`rounded-full px-3.5 py-1.5 text-sm font-medium transition ${
+                locale === "zh-CN"
+                  ? "bg-emerald-600 text-white shadow-sm"
+                  : "text-slate-600 hover:text-slate-800"
+              }`}
+            >
+              {translate("common.chinese")}
+            </button>
+          </div>
         </div>
       </header>
 
@@ -357,6 +376,26 @@ export default function HomePage() {
             </Link>
           </div>
           <p className="mt-3 text-sm text-slate-500">{translate("home.plans.note")}</p>
+        </section>
+
+        <section className="mx-auto w-full max-w-7xl px-4 py-16">
+          <div className="rounded-[2rem] border border-slate-300/70 bg-gradient-to-r from-slate-100 via-white to-blue-50/70 px-6 py-10 shadow-[0_18px_50px_rgba(15,23,42,0.05)] lg:px-10">
+            <p className="text-sm font-medium uppercase tracking-[0.2em] text-blue-700">
+              {translate("blog.fromTheBlogKicker")}
+            </p>
+            <h2 className="mt-4 text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">
+              {translate("blog.fromTheBlogTitle")}
+            </h2>
+            <p className="mt-3 max-w-2xl text-base leading-7 text-slate-600">
+              {getLatestPost().title}
+            </p>
+            <Link
+              href="/blog"
+              className="mt-4 inline-flex rounded-full border border-blue-300/70 bg-white/80 px-5 py-2.5 text-sm font-medium text-blue-700 backdrop-blur transition hover:-translate-y-0.5 hover:border-blue-400 hover:bg-blue-50/80"
+            >
+              {translate("blog.readMore")}
+            </Link>
+          </div>
         </section>
 
         <section className="mx-auto w-full max-w-7xl px-4 pb-24 pt-6">

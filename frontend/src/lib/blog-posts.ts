@@ -16,7 +16,17 @@ export {
   getPosts,
 } from "./blog-posts-meta";
 
-const CONTENT_DIR = path.join(process.cwd(), "..", "content", "blog");
+function resolveContentDir(): string {
+  const inApp = path.join(process.cwd(), "content", "blog");
+  const upOne = path.join(process.cwd(), "..", "content", "blog");
+  try {
+    if (fs.existsSync(inApp)) return inApp;
+  } catch {
+    // ignore
+  }
+  return upOne;
+}
+const CONTENT_DIR = resolveContentDir();
 
 /**
  * Read raw markdown for a post. Call from server only (e.g. in page.tsx).

@@ -10,6 +10,8 @@ import {
   getPosts,
 } from "@/lib/blog-posts";
 
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || "https://listinglive.ca";
+
 type PageProps = { params: Promise<{ slug: string }> };
 
 export function generateStaticParams() {
@@ -19,8 +21,40 @@ export function generateStaticParams() {
 export async function generateMetadata({ params }: PageProps) {
   const { slug } = await params;
   const post = getPostBySlug(slug);
-  if (!post) return { title: "Blog | ListingLive" };
-  return { title: `${post.title} | ListingLive Blog` };
+  if (!post)
+    return { title: "Blog", description: "ListingLive blog." };
+  const description =
+    post.summary ?? `${post.title}. Read more on the ListingLive blog.`;
+  return {
+    title: post.title,
+    description,
+  };
+}
+
+function buildArticleJsonLd(post: { title: string; date: string; slug: string; summary?: string; author?: string }) {
+  const url = `${SITE_URL}/blog/${post.slug}`;
+  const authorName = post.author ?? "ListingLive";
+  return {
+    "@context": "https://schema.org",
+    "@type": "Article",
+    headline: post.title,
+    datePublished: post.date,
+    author: {
+      "@type": "Organization",
+      name: authorName,
+    },
+    publisher: {
+      "@type": "Organization",
+      name: "ListingLive",
+      url: SITE_URL,
+    },
+    description: post.summary ?? post.title,
+    mainEntityOfPage: {
+      "@type": "WebPage",
+      "@id": url,
+    },
+    url,
+  };
 }
 
 export default async function BlogSlugPage({ params }: PageProps) {
@@ -41,25 +75,33 @@ export default async function BlogSlugPage({ params }: PageProps) {
     content = content.replace(/^#\s+[^\n]+\n+/, "");
   }
 
+  const articleJsonLd = buildArticleJsonLd(post);
+
   return (
-    <div className="grid gap-8 lg:grid-cols-[1fr_280px] lg:items-start">
-      <main className="min-w-0 rounded-2xl border border-slate-300/70 bg-white/80 p-6 shadow-[0_18px_50px_rgba(15,23,42,0.05)] lg:p-8">
-        <h1 className="text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">
-          {post.title}
-        </h1>
-        <time
-          dateTime={post.date}
-          className="mt-2 block text-sm text-slate-500"
-        >
-          {new Intl.DateTimeFormat("en", { dateStyle: "long" }).format(
-            new Date(post.date + "T00:00:00"),
-          )}
-        </time>
-        <div className="mt-6">
-          <BlogPostBody content={content} />
-        </div>
-      </main>
-      <BlogSidebar posts={posts} currentSlug={post.slug} dates={dates} />
-    </div>
+    <>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(articleJsonLd) }}
+      />
+      <div className="grid gap-8 lg:grid-cols-[1fr_280px] lg:items-start">
+        <main className="min-w-0 rounded-2xl border border-slate-300/70 bg-white/80 p-6 shadow-[0_18px_50px_rgba(15,23,42,0.05)] lg:p-8">
+          <h1 className="text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">
+            {post.title}
+          </h1>
+          <time
+            dateTime={post.date}
+            className="mt-2 block text-sm text-slate-500"
+          >
+            {new Intl.DateTimeFormat("en", { dateStyle: "long" }).format(
+              new Date(post.date + "T00:00:00"),
+            )}
+          </time>
+          <div className="mt-6">
+            <BlogPostBody content={content} />
+          </div>
+        </main>
+        <BlogSidebar posts={posts} currentSlug={post.slug} dates={dates} />
+      </div>
+    </>
   );
 }

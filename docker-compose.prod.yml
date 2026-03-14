@@ -18,12 +18,14 @@ services:
       context: .
       dockerfile: frontend/Dockerfile.prod
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://listinglive.ca/api}
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-https://listinglive.ca}
     restart: unless-stopped
     environment:
       NODE_ENV: production
       TZ: ${CONTAINER_TIMEZONE:-UTC}
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://listinglive.ca/api}
+      NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-https://listinglive.ca}
     volumes:
       - /etc/localtime:/etc/localtime:ro
     healthcheck:

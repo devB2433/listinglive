@@ -10,8 +10,9 @@ import {
 } from "@/lib/blog-posts";
 
 export const metadata = {
-  title: "Blog | ListingLive",
-  description: "Updates and product notes from ListingLive.",
+  title: "Blog",
+  description:
+    "Product updates, release notes, and tips for real estate agents using ListingLive. Canada-focused AI tools for listing video and marketing.",
 };
 
 export default function BlogPage() {

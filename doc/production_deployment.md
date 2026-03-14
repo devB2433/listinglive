@@ -137,6 +137,7 @@ sudo ./scripts/prod/init-host.sh
 
 - `APP_DOMAIN`
 - `NEXT_PUBLIC_API_URL`
+- `NEXT_PUBLIC_SITE_URL`（前端 sitemap/OG/结构化数据用，建议与主域名一致，如 `https://listinglive.ca`）
 - `SECRET_KEY`
 - `POSTGRES_PASSWORD`
 - `DATABASE_URL`
@@ -160,6 +161,7 @@ sudo ./scripts/prod/init-host.sh
 ```dotenv
 APP_DOMAIN=listinglive.ca
 NEXT_PUBLIC_API_URL=https://listinglive.ca/api
+NEXT_PUBLIC_SITE_URL=https://listinglive.ca
 CORS_ORIGINS=["https://listinglive.ca","https://www.listinglive.ca"]
 STRIPE_CHECKOUT_SUCCESS_URL=https://listinglive.ca/billing?checkout=success
 STRIPE_CHECKOUT_CANCEL_URL=https://listinglive.ca/billing?checkout=cancel
@@ -170,6 +172,8 @@ SMTP_USERNAME=hello@listinglive.ca
 ```
 
 上面这部分属于“已知可先写死”的配置；真正还需要你后续补齐的是密钥、密码、SMTP 主机等敏感参数。
+
+**与 `update.sh` 的关系**：部署时 `docker compose` 使用 `--env-file` 读取 `.env.prod`。若文件中未设置 `NEXT_PUBLIC_API_URL` 或 `NEXT_PUBLIC_SITE_URL`，`docker-compose.prod.yml` 会使用默认值（`https://listinglive.ca/api` 与 `https://listinglive.ca`），前端镜像仍可正常构建，不会因缺变量报错。
 
 ### 6.1.0 容器时区
 
@@ -352,6 +356,7 @@ SMTP_USE_SSL=false
 
 - `APP_DOMAIN`
 - `NEXT_PUBLIC_API_URL`
+- `NEXT_PUBLIC_SITE_URL`（如 `https://listinglive.ca`，用于 sitemap/OG/结构化数据）
 - `SECRET_KEY`（你自己在 VM 上生成）
 - `POSTGRES_PASSWORD`（你自己在 VM 上生成）
 - `DATABASE_URL`（必须使用同一个数据库密码）

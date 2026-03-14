@@ -13,6 +13,8 @@ ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=deps /app/node_modules ./node_modules
 COPY frontend ./
 COPY content ./content
+# Hero demo: 3 photos + 1 video (left/right comparison)
+COPY content/media ./public/media
 
 ARG NEXT_PUBLIC_API_URL
 ARG NEXT_PUBLIC_SITE_URL

@@ -60,6 +60,13 @@ if [[ "${SKIP_BACKUP}" -eq 0 ]]; then
   BACKUP_STAMP="$("${SCRIPT_DIR}/backup.sh" --quiet | tail -n 1)"
 fi
 
+# Frontend image copies content/media into public/media; ensure it exists so build does not fail
+if [[ ! -d "${ROOT_DIR}/content/media" ]]; then
+  log "WARNING: content/media not found. Frontend Hero media may be missing. Create it or add placeholder files."
+  mkdir -p "${ROOT_DIR}/content/media/pic" "${ROOT_DIR}/content/media/video"
+  log "Created empty content/media directories. Replace with real assets if needed."
+fi
+
 log "Building production images"
 compose build frontend api worker beat
 

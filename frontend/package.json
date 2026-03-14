@@ -3,7 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "sync-media": "node scripts/sync-media.js",
+    "dev": "npm run sync-media && next dev",
     "dev:fixed": "next dev -p 3001",
     "build": "next build",
     "start": "next start",
@@ -11,6 +12,7 @@
   },
   "dependencies": {
     "@tailwindcss/typography": "^0.5.19",
+    "lucide-react": "^0.577.0",
     "next": "14.2.35",
     "react": "^18",
     "react-dom": "^18",

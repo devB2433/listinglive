@@ -1,0 +1,47 @@
+---
+description: 博客发布约定——新文章必须放在 content/blog 并在 blog-posts-meta.ts 登记，写 blog 时务必满足
+globs: content/blog/**/*.md,frontend/src/lib/blog-posts-meta.ts
+alwaysApply: false
+---
+
+# 博客发布约定（写 blog 时务必满足）
+
+本站博客**不在 .md 里写 YAML front matter**，元数据统一在 **`frontend/src/lib/blog-posts-meta.ts`** 的 `BLOG_POSTS` 里维护。每次新增或发布一篇 blog，必须同时完成下面两项。
+
+## 1. 在 `content/blog/` 下新增或修改 .md
+
+- **路径**：`content/blog/<文件名>.md`，文件名与下文的 `sourceFile` **完全一致**（含扩展名 `.md`）。
+- **内容**：直接写 Markdown，**不要在文件顶部写 YAML**。建议首行为一级标题 `# 标题`，与 meta 的 `title` 一致或接近。
+
+## 2. 在 `blog-posts-meta.ts` 里登记或更新一条
+
+在 **`frontend/src/lib/blog-posts-meta.ts`** 的 `BLOG_POSTS` 数组中必须有且仅有一条对应记录：
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| **slug** | ✅ | URL 段，对应 `/blog/[slug]`，英文小写连字符，如 `my-new-post`。通常与文件名去掉 `.md` 一致。 |
+| **title** | ✅ | 文章标题。 |
+| **date** | ✅ | 发布日期，格式 **YYYY-MM-DD**。 |
+| **sourceFile** | ✅ | 文件名，必须与 `content/blog/` 下文件名**完全一致**，如 `my-new-post.md`。 |
+| **summary** | 可选 | 短文摘要，用于 meta description 与 SEO，建议 1～2 句。 |
+| **author** | 可选 | 作者名，用于结构化数据；不填默认为 "ListingLive"。 |
+
+**示例**（新增一篇时在 `BLOG_POSTS` 中加一条）：
+
+```ts
+{
+  slug: "my-new-post",
+  title: "My New Post",
+  date: "2026-03-15",
+  sourceFile: "my-new-post.md",
+  summary: "一句简短摘要。",
+  author: "Your Name",  // 可选
+},
+```
+
+## 自检
+
+- [ ] `content/blog/<sourceFile>` 已存在，且 `sourceFile` 与 meta 完全一致。
+- [ ] `BLOG_POSTS` 中有对应项，且 **slug、title、date、sourceFile** 必填且格式正确（date 为 YYYY-MM-DD）。
+
+详细说明见 **`doc/SEO_实操指导.md`** 第三节。

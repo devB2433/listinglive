@@ -1,6 +1,8 @@
 部署实录----------.txt
 .env
 .env.prod
+.env.prod.test
+.tmp/
 config/ai_provider.toml
 .venv/
 venv/

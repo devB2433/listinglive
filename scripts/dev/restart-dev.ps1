@@ -145,6 +145,26 @@ if (Test-Path $frontendBuildDir) {
 $env:CONTAINER_TIMEZONE = Get-ContainerTimeZone
 docker-compose up -d postgres redis | Out-Null
 
+# === Phase 4.5: Wait for Postgres and run migrations ===
+$pgReady = $false
+$pgDeadline = (Get-Date).AddSeconds(30)
+while ((Get-Date) -lt $pgDeadline) {
+  try {
+    docker-compose exec -T postgres pg_isready -U listinglive 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) { $pgReady = $true; break }
+  } catch {}
+  Start-Sleep -Milliseconds 800
+}
+if (-not $pgReady) {
+  Write-Warning "Postgres did not become ready in time; migrations may fail."
+}
+$env:PYTHONPATH = $root
+Write-Host "Running database migrations (alembic upgrade head)..."
+& python -m alembic upgrade head
+if ($LASTEXITCODE -ne 0) {
+  Write-Error "Database migration failed. Fix errors and re-run the script."
+}
+
 # === Phase 5: Reset log files ===
 New-Item -ItemType Directory -Force $runtimeDir | Out-Null
 

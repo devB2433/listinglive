@@ -115,6 +115,10 @@ async def register(
     """注册：校验验证码后创建用户。"""
     username = _normalize_auth_identity(username)
     email = _normalize_auth_identity(email)
+    if not username:
+        raise AppError("auth.register.usernameRequired")
+    if not email:
+        raise AppError("auth.register.emailRequired")
     if not await verify_code(redis, email, code):
         raise AppError("auth.register.invalidCode")
     _validate_password_strength(password)

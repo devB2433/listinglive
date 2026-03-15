@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 
 import { useLocale } from "@/components/providers/locale-provider";
 import { translateApiError } from "@/lib/locale";
-import { register, sendCode } from "@/lib/api";
+import { ApiError, register, sendCode } from "@/lib/api";
 import { setStoredTokens } from "@/lib/session";
 
 type RegisterFieldErrors = {
@@ -50,44 +50,42 @@ export default function RegisterPage() {
     return message === code || message === getTranslatedApiError(code);
   }
 
-  function buildRegisterFieldErrors(message: string): RegisterFieldErrors {
-    if (matchesApiError(message, "auth.register.usernameExists")) {
-      return {
-        username: translate("auth.register.usernameExistsHint"),
-      };
+  function buildRegisterFieldErrors(message: string, code?: string): RegisterFieldErrors {
+    const c = code ?? message;
+    if (c === "auth.register.usernameExists" || matchesApiError(message, "auth.register.usernameExists")) {
+      return { username: translate("auth.register.usernameExistsHint") };
     }
-    if (matchesApiError(message, "auth.register.emailExists")) {
-      return {
-        email: translate("auth.register.emailExistsHint"),
-      };
+    if (c === "auth.register.emailExists" || matchesApiError(message, "auth.register.emailExists")) {
+      return { email: translate("auth.register.emailExistsHint") };
     }
-    if (matchesApiError(message, "auth.register.invalidCode")) {
-      return {
-        code: getTranslatedApiError("auth.register.invalidCode"),
-      };
+    if (c === "auth.register.usernameRequired") {
+      return { username: getTranslatedApiError("auth.register.usernameRequired") };
     }
-    if (matchesApiError(message, "auth.register.inviteCodeRequired")) {
-      return {
-        inviteCode: getTranslatedApiError("auth.register.inviteCodeRequired"),
-      };
+    if (c === "auth.register.emailRequired") {
+      return { email: getTranslatedApiError("auth.register.emailRequired") };
+    }
+    if (c === "auth.register.invalidCode" || matchesApiError(message, "auth.register.invalidCode")) {
+      return { code: getTranslatedApiError("auth.register.invalidCode") };
+    }
+    if (c === "auth.register.inviteCodeRequired") {
+      return { inviteCode: getTranslatedApiError("auth.register.inviteCodeRequired") };
     }
     if (
+      c === "auth.register.inviteCodeInvalid" ||
+      c === "auth.register.inviteCodeDisabled" ||
       matchesApiError(message, "auth.register.inviteCodeInvalid") ||
       matchesApiError(message, "auth.register.inviteCodeDisabled")
     ) {
-      return {
-        inviteCode: message,
-      };
+      return { inviteCode: message };
     }
     if (
+      c?.startsWith("auth.password.") ||
       matchesApiError(message, "auth.password.tooShort") ||
       matchesApiError(message, "auth.password.missingUppercase") ||
       matchesApiError(message, "auth.password.missingLowercase") ||
       matchesApiError(message, "auth.password.missingSpecial")
     ) {
-      return {
-        password: message,
-      };
+      return { password: message };
     }
     return { general: message };
   }
@@ -133,8 +131,9 @@ export default function RegisterPage() {
       router.replace("/dashboard");
     } catch (err) {
       const message = err instanceof Error ? err.message : translate("auth.register.registerFailed");
+      const code = err instanceof ApiError ? err.code : undefined;
       setError(message);
-      setFieldErrors(buildRegisterFieldErrors(message));
+      setFieldErrors(buildRegisterFieldErrors(message, code));
     } finally {
       setRegistering(false);
     }

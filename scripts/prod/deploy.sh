@@ -36,6 +36,8 @@ ensure_commands docker git curl
 require_env_values APP_GIT_BRANCH PROXY_PORT
 ensure_prod_dirs
 
+log "Using container timezone: ${CONTAINER_TIMEZONE}"
+
 PREVIOUS_REF="$(current_git_ref)"
 
 if [[ "${SKIP_PULL}" -eq 0 ]]; then

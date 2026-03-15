@@ -154,7 +154,7 @@ sudo ./scripts/prod/init-host.sh
 - `SMTP_USERNAME`
 - `SMTP_PASSWORD`
 - `VIDEO_PROVIDER_CONCURRENCY_LIMIT`
-- `CONTAINER_TIMEZONE`（如果你想手动覆盖）
+- `CONTAINER_TIMEZONE_OVERRIDE`（只有你想手动覆盖宿主机时区时才填写）
 
 如果你当前已经确定正式主域名是 `listinglive.ca`，那么下面这些值可以先直接按这个口径填写：
 
@@ -189,11 +189,11 @@ SMTP_USERNAME=hello@listinglive.ca
 
 同时会把宿主机的 `/etc/localtime` 只读挂载进生产容器，尽量确保容器内时间显示、日志时间和宿主机一致。
 
-一般情况下你 **不用手动填写** `CONTAINER_TIMEZONE`。  
+一般情况下你 **不用手动填写** 容器时区。  
 只有当你想强制覆盖宿主机时区时，才在 `.env.prod` 里显式写，例如：
 
 ```dotenv
-CONTAINER_TIMEZONE=America/Toronto
+CONTAINER_TIMEZONE_OVERRIDE=America/Toronto
 ```
 
 ### 6.1.1 第三方并发限制建议

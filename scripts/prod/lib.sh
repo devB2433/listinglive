@@ -52,7 +52,7 @@ load_env() {
   export BACKUP_DAILY_RETENTION_DAYS="${BACKUP_DAILY_RETENTION_DAYS:-7}"
   export BACKUP_WEEKLY_RETENTION_DAYS="${BACKUP_WEEKLY_RETENTION_DAYS:-28}"
   export APP_GIT_BRANCH="${APP_GIT_BRANCH:-main}"
-  export CONTAINER_TIMEZONE="${CONTAINER_TIMEZONE:-$(detect_host_timezone)}"
+  export CONTAINER_TIMEZONE="${CONTAINER_TIMEZONE_OVERRIDE:-$(detect_host_timezone)}"
 }
 
 require_env_values() {
@@ -63,9 +63,14 @@ require_env_values() {
 }
 
 detect_host_timezone() {
-  if [[ -n "${CONTAINER_TIMEZONE:-}" ]]; then
-    printf '%s\n' "${CONTAINER_TIMEZONE}"
-    return 0
+  local tz_name=""
+
+  if command -v timedatectl >/dev/null 2>&1; then
+    tz_name="$(timedatectl show --property=Timezone --value 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ -n "${tz_name}" && "${tz_name}" != "n/a" ]]; then
+      printf '%s\n' "${tz_name}"
+      return 0
+    fi
   fi
 
   if [[ -f /etc/timezone ]]; then

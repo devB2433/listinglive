@@ -34,6 +34,10 @@ class UploadLogoResponse(UserLogoOut):
     pass
 
 
+class RenameLogoRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+
+
 class UserAvatarOut(BaseModel):
     id: UUID
     key: str

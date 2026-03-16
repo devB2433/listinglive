@@ -41,7 +41,7 @@ class AuthServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_register_rejects_duplicate_username(self) -> None:
         db = AsyncMock()
-        db.execute = AsyncMock(side_effect=[_FakeResult(SimpleNamespace(id="u1"))])
+        db.execute = AsyncMock(side_effect=[_FakeResult(None), _FakeResult(SimpleNamespace(id="u1"))])
         redis = AsyncMock()
 
         with patch("backend.services.auth_service.verify_code", AsyncMock(return_value=True)):
@@ -52,7 +52,7 @@ class AuthServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_register_rejects_duplicate_email(self) -> None:
         db = AsyncMock()
-        db.execute = AsyncMock(side_effect=[_FakeResult(None), _FakeResult(SimpleNamespace(id="u2"))])
+        db.execute = AsyncMock(side_effect=[_FakeResult(None), _FakeResult(None), _FakeResult(SimpleNamespace(id="u2"))])
         redis = AsyncMock()
 
         with patch("backend.services.auth_service.verify_code", AsyncMock(return_value=True)):
@@ -63,7 +63,7 @@ class AuthServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_register_duplicate_checks_exclude_archived_users(self) -> None:
         db = AsyncMock()
-        db.execute = AsyncMock(side_effect=[_FakeResult(None), _FakeResult(None)])
+        db.execute = AsyncMock(side_effect=[_FakeResult(None), _FakeResult(None), _FakeResult(None)])
         db.flush = AsyncMock()
         db.add = Mock()
         redis = AsyncMock()
@@ -76,14 +76,14 @@ class AuthServiceTests(unittest.IsolatedAsyncioTestCase):
                         with patch("backend.services.quota_service.ensure_signup_pro_trial_subscription", AsyncMock()):
                             await register(db, redis, "new-user", "Password!1", "new@example.com", "123456", "INVITE88")
 
-        username_stmt = db.execute.await_args_list[0].args[0]
-        email_stmt = db.execute.await_args_list[1].args[0]
-        self.assertIn("users.status != 'archived'", _compile_sql(username_stmt))
-        self.assertIn("users.status != 'archived'", _compile_sql(email_stmt))
+        username_stmt = db.execute.await_args_list[1].args[0]
+        email_stmt = db.execute.await_args_list[2].args[0]
+        self.assertIn("lower(trim(coalesce(users.status, ''))) != 'archived'", _compile_sql(username_stmt))
+        self.assertIn("lower(trim(coalesce(users.status, ''))) != 'archived'", _compile_sql(email_stmt))
 
     async def test_register_normalizes_username_and_email_to_lowercase(self) -> None:
         db = AsyncMock()
-        db.execute = AsyncMock(side_effect=[_FakeResult(None), _FakeResult(None)])
+        db.execute = AsyncMock(side_effect=[_FakeResult(None), _FakeResult(None), _FakeResult(None)])
         db.flush = AsyncMock()
         db.add = Mock()
         redis = AsyncMock()
@@ -111,7 +111,7 @@ class AuthServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_register_creates_signup_pro_trial_subscription(self) -> None:
         db = AsyncMock()
-        db.execute = AsyncMock(side_effect=[_FakeResult(None), _FakeResult(None)])
+        db.execute = AsyncMock(side_effect=[_FakeResult(None), _FakeResult(None), _FakeResult(None)])
         db.flush = AsyncMock()
         db.add = Mock()
         redis = AsyncMock()
@@ -152,7 +152,7 @@ class AuthServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(authenticated, user)
         stmt = db.execute.await_args.args[0]
-        self.assertIn("users.status != 'archived'", _compile_sql(stmt))
+        self.assertIn("lower(trim(coalesce(users.status, ''))) != 'archived'", _compile_sql(stmt))
 
     async def test_authenticate_user_rejects_root_when_not_allowed(self) -> None:
         db = AsyncMock()
@@ -249,7 +249,7 @@ class AuthServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(user.password_hash, "old-hash")
         self.assertTrue(user.email_verified)
         stmt = db.execute.await_args.args[0]
-        self.assertIn("users.status != 'archived'", _compile_sql(stmt))
+        self.assertIn("lower(trim(coalesce(users.status, ''))) != 'archived'", _compile_sql(stmt))
 
 
 if __name__ == "__main__":

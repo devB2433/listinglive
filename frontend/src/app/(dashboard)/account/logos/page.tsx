@@ -18,6 +18,7 @@ import {
   type UpsertProfileCardBody,
   type UserAvatar,
   type UserLogo,
+  updateLogoName,
   updateProfileCard,
   uploadVideoAsset,
 } from "@/lib/api";
@@ -49,6 +50,12 @@ const AUTOFILL_IGNORE_PROPS = {
   "data-bwignore": "true",
 } as const;
 
+function getAssetDisplayKey(key: string) {
+  if (!key) return "";
+  const parts = key.split("/");
+  return parts[parts.length - 1] || key;
+}
+
 export default function AccountLogosPage() {
   const { accessToken } = useDashboardSession();
   const { translate } = useLocale();
@@ -57,8 +64,6 @@ export default function AccountLogosPage() {
   const [logos, setLogos] = useState<UserLogo[]>([]);
   const [avatars, setAvatars] = useState<UserAvatar[]>([]);
   const [profileCards, setProfileCards] = useState<ProfileCard[]>([]);
-  const [logoFile, setLogoFile] = useState<File | null>(null);
-  const [logoName, setLogoName] = useState("");
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const [avatarName, setAvatarName] = useState("");
   const [avatarSourceUrl, setAvatarSourceUrl] = useState("");
@@ -70,6 +75,8 @@ export default function AccountLogosPage() {
   const [uploading, setUploading] = useState(false);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
   const [busyLogoId, setBusyLogoId] = useState("");
+  const [editingLogoId, setEditingLogoId] = useState("");
+  const [editingLogoName, setEditingLogoName] = useState("");
   const [busyAvatarId, setBusyAvatarId] = useState("");
   const [busyProfileCardId, setBusyProfileCardId] = useState("");
   const [message, setMessage] = useState("");
@@ -257,13 +264,9 @@ export default function AccountLogosPage() {
     setProfileCards(latestCards);
   }
 
-  async function handleUploadLogo() {
-    if (!logoFile) {
+  async function handleUploadLogo(file: File | null) {
+    if (!file) {
       setError(translate("dashboard.accountPage.chooseLogoFirst"));
-      return;
-    }
-    if (!logoName.trim()) {
-      setError(translate("dashboard.accountPage.enterLogoName"));
       return;
     }
 
@@ -271,11 +274,10 @@ export default function AccountLogosPage() {
     setError("");
     setMessage("");
     try {
-      await uploadVideoAsset(accessToken, logoFile, "logo", { name: logoName.trim() });
+      const inferredName = file.name.replace(/\.[^.]+$/, "").trim() || "Logo";
+      await uploadVideoAsset(accessToken, file, "logo", { name: inferredName });
       invalidateUserLogosCache(accessToken);
       await reloadLogos();
-      setLogoFile(null);
-      setLogoName("");
       if (logoInputRef.current) {
         logoInputRef.current.value = "";
       }
@@ -298,6 +300,40 @@ export default function AccountLogosPage() {
       setMessage(translate("dashboard.accountPage.defaultUpdated"));
     } catch (err) {
       setError(err instanceof Error ? err.message : translate("dashboard.accountPage.defaultUpdateFailed"));
+    } finally {
+      setBusyLogoId("");
+    }
+  }
+
+  function beginEditLogo(logo: UserLogo) {
+    setEditingLogoId(logo.id);
+    setEditingLogoName(logo.name);
+    setError("");
+    setMessage("");
+  }
+
+  function cancelEditLogo() {
+    setEditingLogoId("");
+    setEditingLogoName("");
+  }
+
+  async function handleRenameLogo(logoId: string) {
+    const nextName = editingLogoName.trim();
+    if (!nextName) {
+      setError(translate("dashboard.accountPage.enterLogoName"));
+      return;
+    }
+    setBusyLogoId(logoId);
+    setError("");
+    setMessage("");
+    try {
+      await updateLogoName(accessToken, logoId, nextName);
+      invalidateUserLogosCache(accessToken);
+      await reloadLogos();
+      cancelEditLogo();
+      setMessage(translate("dashboard.accountPage.logoRenamed"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : translate("dashboard.accountPage.logoRenameFailed"));
     } finally {
       setBusyLogoId("");
     }
@@ -544,93 +580,122 @@ export default function AccountLogosPage() {
 
   return (
     <section className="rounded-2xl border bg-white p-6">
-      <h2 className="text-lg font-semibold text-gray-900">{translate("dashboard.accountPage.logoTitle")}</h2>
-      <p className="mt-2 text-sm text-gray-600">{translate("dashboard.accountPage.logoSubtitle")}</p>
-
       <div className="mt-4 rounded-xl border bg-gray-50 p-4">
-        <label className="mb-1 block text-sm font-medium text-gray-700">{translate("dashboard.accountPage.logoNameLabel")}</label>
-        <input
-          type="text"
-          value={logoName}
-          onChange={(e) => setLogoName(e.target.value)}
-          {...AUTOFILL_IGNORE_PROPS}
-          className="mb-3 w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
-          placeholder={translate("dashboard.accountPage.logoNamePlaceholder")}
-        />
+        <h3 className="text-sm font-semibold text-gray-900">{translate("dashboard.accountPage.logoManagementTitle")}</h3>
         <input
           ref={logoInputRef}
           type="file"
           accept="image/png,image/jpeg,image/webp"
-          onChange={(e) => setLogoFile(e.target.files?.[0] || null)}
+          onChange={(e) => {
+            const file = e.target.files?.[0] || null;
+            if (!file) return;
+            void handleUploadLogo(file);
+          }}
           className="hidden"
         />
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <button
             type="button"
             onClick={() => logoInputRef.current?.click()}
+            disabled={uploading}
             className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700 hover:bg-blue-100"
           >
-            {translate("common.uploadLogo")}
-          </button>
-          <button
-            type="button"
-            onClick={() => void handleUploadLogo()}
-            disabled={uploading || !logoFile}
-            className="rounded-md border px-3 py-2 text-sm text-blue-600 hover:bg-blue-50 disabled:opacity-50"
-          >
-            {uploading ? translate("common.uploading") : translate("dashboard.accountPage.confirmUpload")}
+            {uploading ? translate("common.uploading") : translate("dashboard.accountPage.pickAndUploadLogo")}
           </button>
           <p className="text-xs text-gray-500">
-            {logoFile
-              ? translate("dashboard.accountPage.selectedFile", { name: logoFile.name })
-              : translate("dashboard.accountPage.supportTypes")}
+            {translate("dashboard.accountPage.supportTypes")}
           </p>
         </div>
-      </div>
 
-      {message && <p className="mt-4 text-sm text-green-600">{message}</p>}
-      {error && <p className="mt-4 text-sm text-red-600">{error}</p>}
+        {message && <p className="mt-3 text-sm text-green-600">{message}</p>}
+        {error && <p className="mt-3 text-sm text-red-600">{error}</p>}
 
-      <div className="mt-6 space-y-3">
-        <h3 className="text-sm font-semibold text-gray-900">{translate("dashboard.accountPage.uploadedLogos")}</h3>
-        {logos.length === 0 && (
-          <div className="rounded-xl border border-dashed p-4 text-sm text-gray-500">{translate("dashboard.accountPage.noLogos")}</div>
-        )}
-        {logos.map((logo) => (
-          <div key={logo.key} className="rounded-xl border p-4">
-            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-              <div>
-                <div className="flex items-center gap-2">
-                  <p className="font-medium text-gray-900">{logo.name}</p>
-                  {logo.is_default && (
-                    <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">{translate("common.default")}</span>
+        <div className="mt-4 space-y-3">
+          <h3 className="text-sm font-semibold text-gray-900">{translate("dashboard.accountPage.uploadedLogos")}</h3>
+          {logos.length === 0 && (
+            <div className="rounded-xl border border-dashed bg-white p-4 text-sm text-gray-500">{translate("dashboard.accountPage.noLogos")}</div>
+          )}
+          {logos.map((logo) => (
+            <div key={logo.key} className="rounded-xl border bg-white p-4">
+              <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                <div>
+                  {editingLogoId === logo.id ? (
+                    <div className="flex max-w-md items-center gap-2">
+                      <input
+                        type="text"
+                        value={editingLogoName}
+                        onChange={(event) => setEditingLogoName(event.target.value)}
+                        {...AUTOFILL_IGNORE_PROPS}
+                        className="w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm"
+                        placeholder={translate("dashboard.accountPage.logoNamePlaceholder")}
+                      />
+                      {logo.is_default && (
+                        <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">{translate("common.default")}</span>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <p className="font-medium text-gray-900">{logo.name}</p>
+                      {logo.is_default && (
+                        <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">{translate("common.default")}</span>
+                      )}
+                    </div>
                   )}
+                  <p className="mt-1 break-all text-xs text-gray-500">{getAssetDisplayKey(logo.key)}</p>
                 </div>
-                <p className="mt-1 break-all text-xs text-gray-500">{logo.key}</p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {!logo.is_default && (
+                <div className="flex flex-wrap gap-2">
+                  {editingLogoId === logo.id ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => void handleRenameLogo(logo.id)}
+                        disabled={busyLogoId === logo.id}
+                        className="rounded-md border px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 disabled:opacity-50"
+                      >
+                        {translate("common.save")}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={cancelEditLogo}
+                        disabled={busyLogoId === logo.id}
+                        className="rounded-md border px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                      >
+                        {translate("common.cancel")}
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => beginEditLogo(logo)}
+                      disabled={busyLogoId === logo.id}
+                      className="rounded-md border px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      {translate("dashboard.accountPage.renameAction")}
+                    </button>
+                  )}
+                  {!logo.is_default && (
+                    <button
+                      type="button"
+                      onClick={() => void handleSetDefault(logo.id)}
+                      disabled={busyLogoId === logo.id}
+                      className="rounded-md border px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 disabled:opacity-50"
+                    >
+                      {translate("dashboard.accountPage.setDefault")}
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={() => void handleSetDefault(logo.id)}
+                    onClick={() => void handleDelete(logo.id)}
                     disabled={busyLogoId === logo.id}
-                    className="rounded-md border px-3 py-1.5 text-sm text-blue-600 hover:bg-blue-50 disabled:opacity-50"
+                    className="rounded-md border px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 disabled:opacity-50"
                   >
-                    {translate("dashboard.accountPage.setDefault")}
+                    {translate("common.delete")}
                   </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => void handleDelete(logo.id)}
-                  disabled={busyLogoId === logo.id}
-                  className="rounded-md border px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 disabled:opacity-50"
-                >
-                  {translate("common.delete")}
-                </button>
+                </div>
               </div>
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
 
       <div className="mt-8 rounded-xl border bg-gray-50 p-4">
@@ -755,7 +820,7 @@ export default function AccountLogosPage() {
                     <p className="font-medium text-gray-900">{avatar.name}</p>
                     {avatar.is_default && <span className="rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">{translate("common.default")}</span>}
                   </div>
-                  <p className="mt-1 break-all text-xs text-gray-500">{avatar.key}</p>
+                  <p className="mt-1 break-all text-xs text-gray-500">{getAssetDisplayKey(avatar.key)}</p>
                 </div>
                 <div className="flex gap-2">
                   {!avatar.is_default && (

@@ -69,6 +69,12 @@ def build_access_context_from_snapshot(snapshot: dict) -> AccessContext:
         subscription_cancel_at_period_end=getattr(subscription, "cancel_at_period_end", False)
         if subscription is not None
         else False,
+        trial_expires_at=getattr(subscription, "current_period_end", None)
+        if subscription is not None and snapshot.get("subscription_is_local_trial", False)
+        else None,
+        subscription_current_period_start=getattr(subscription, "current_period_start", None)
+        if subscription is not None
+        else None,
         subscription_current_period_end=getattr(subscription, "current_period_end", None) if subscription is not None else None,
         subscription_remaining=snapshot["subscription_remaining"],
         package_remaining=snapshot["package_remaining"],
@@ -76,6 +82,8 @@ def build_access_context_from_snapshot(snapshot: dict) -> AccessContext:
         signup_bonus_remaining=snapshot["signup_bonus_remaining"],
         invite_bonus_remaining=snapshot.get("invite_bonus_remaining", 0),
         total_available=snapshot["total_available"],
+        pending_reserved=snapshot.get("pending_reserved", 0),
+        schedulable_available=snapshot.get("schedulable_available", snapshot["total_available"]),
         capabilities=tuple(sorted(tier_entitlement.capabilities)),
         limits=get_tier_limits(access_tier, storage_days_display=storage_days_display),
         can_purchase_quota_package="buy_quota_package" in tier_entitlement.capabilities,

@@ -1,0 +1,22 @@
+---
+description: Trigger ListingLive regression framework workflow on full-regression requests
+alwaysApply: true
+---
+
+# Regression Framework Trigger
+
+When user asks for full or release-level regression (e.g., "全面回归测试", "全量回归", "回归门禁", "发布前回归"), prioritize the standalone framework in:
+
+- `C:/Data/projects/listinglive-regression`
+
+Execution preference:
+
+1. Use `pwsh -File ./scripts/run-regression.ps1 -Mode core` for release-blocking checks.
+2. Use `pwsh -File ./scripts/run-regression.ps1 -Mode full` for complete coverage.
+3. Use `pwsh -File ./scripts/run-regression.ps1 -Mode quick` for smoke checks.
+
+On failure, request and analyze:
+
+- `reports/failure-summary.md`
+- `reports/results.json`
+- optional `reports/html/index.html`

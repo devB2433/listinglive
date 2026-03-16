@@ -8,6 +8,8 @@ from uuid import UUID
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.core.api_errors import AppError
+from backend.core.entitlements import PLAN_TIER_ORDER
 from backend.models.quota import QuotaPackage, QuotaPackagePlan
 from backend.models.subscription import Subscription, SubscriptionPlan
 from backend.models.video_task import VideoTask
@@ -37,6 +39,54 @@ class QuotaChargeBreakdown:
     @property
     def total_used(self) -> int:
         return self.subscription_used + self.paid_package_used + self.signup_bonus_used + self.invite_bonus_used
+
+
+class QuotaInsufficientError(AppError):
+    def __init__(
+        self,
+        *,
+        required_quota: int,
+        available_quota: int,
+        pending_reserved: int = 0,
+        task_kind: str | None = None,
+    ) -> None:
+        super().__init__(code="billing.quota.insufficient", status_code=400)
+        self.required_quota = max(int(required_quota), 0)
+        self.available_quota = max(int(available_quota), 0)
+        self.pending_reserved = max(int(pending_reserved), 0)
+        self.task_kind = task_kind
+
+    def to_detail(self) -> dict:
+        detail = {
+            "code": self.code,
+            "message": "可用配额不足",
+            "required_quota": self.required_quota,
+            "available_quota": self.available_quota,
+            "pending_reserved": self.pending_reserved,
+        }
+        if self.task_kind:
+            detail["task_kind"] = self.task_kind
+        return detail
+
+
+def get_quota_package_consume_priority(package_type: str | None) -> int:
+    if package_type == SIGNUP_BONUS_PACKAGE_TYPE:
+        return 1
+    if package_type == INVITE_BONUS_PACKAGE_TYPE:
+        return 2
+    return 0
+
+
+def sort_quota_packages_for_consumption(packages: list[QuotaPackage]) -> list[QuotaPackage]:
+    return sorted(
+        packages,
+        key=lambda package: (
+            get_quota_package_consume_priority(getattr(package, "package_type", None)),
+            getattr(package, "expires_at", None) is None,
+            getattr(package, "expires_at", None) or MAX_DATETIME_UTC,
+            getattr(package, "created_at", None) or MIN_DATETIME_UTC,
+        ),
+    )
 
 
 async def ensure_signup_bonus(db: AsyncSession, user_id: UUID) -> None:
@@ -109,6 +159,7 @@ def pick_current_subscription(subscriptions: list[Subscription], *, now: datetim
         subscriptions,
         key=lambda sub: (
             is_billing_managed_subscription(sub),
+            PLAN_TIER_ORDER.get(getattr(sub, "plan_type", None), 0),
             sub.current_period_start or MIN_DATETIME_UTC,
             sub.current_period_end or MAX_DATETIME_UTC,
             sub.created_at or MIN_DATETIME_UTC,
@@ -208,6 +259,10 @@ async def get_quota_snapshot(db: AsyncSession, user_id: UUID) -> dict:
     if subscription:
         subscription_remaining = max(subscription.quota_per_month - subscription.quota_used, 0)
 
+    total_available = subscription_remaining + package_remaining
+    pending_reserved = await get_pending_task_charge_amount(db, user_id)
+    schedulable_available = max(total_available - pending_reserved, 0)
+
     return {
         "subscription": subscription,
         "subscription_is_local_trial": is_local_trial_subscription(subscription),
@@ -217,7 +272,9 @@ async def get_quota_snapshot(db: AsyncSession, user_id: UUID) -> dict:
         "paid_package_remaining": paid_package_remaining,
         "signup_bonus_remaining": signup_bonus_remaining,
         "invite_bonus_remaining": invite_bonus_remaining,
-        "total_available": subscription_remaining + package_remaining,
+        "total_available": total_available,
+        "pending_reserved": pending_reserved,
+        "schedulable_available": schedulable_available,
         "packages": valid_packages,
     }
 
@@ -233,19 +290,39 @@ async def get_pending_task_charge_amount(db: AsyncSession, user_id: UUID, *, exc
     return max(int(value or 0), 0)
 
 
-async def check_quota_available(db: AsyncSession, user_id: UUID, amount: int, *, exclude_task_id: UUID | None = None) -> int:
+async def check_quota_available(
+    db: AsyncSession,
+    user_id: UUID,
+    amount: int,
+    *,
+    exclude_task_id: UUID | None = None,
+    task_kind: str | None = None,
+) -> int:
     snapshot = await get_quota_snapshot(db, user_id)
-    pending_reserved = await get_pending_task_charge_amount(db, user_id, exclude_task_id=exclude_task_id)
+    pending_reserved = (
+        snapshot["pending_reserved"]
+        if exclude_task_id is None and "pending_reserved" in snapshot
+        else await get_pending_task_charge_amount(db, user_id, exclude_task_id=exclude_task_id)
+    )
     schedulable_available = max(snapshot["total_available"] - pending_reserved, 0)
     if schedulable_available < amount:
-        raise ValueError("可用配额不足")
+        raise QuotaInsufficientError(
+            required_quota=amount,
+            available_quota=schedulable_available,
+            pending_reserved=pending_reserved,
+            task_kind=task_kind,
+        )
     return schedulable_available
 
 
 async def consume_quota(db: AsyncSession, user_id: UUID, amount: int) -> QuotaChargeBreakdown:
     snapshot = await get_quota_snapshot(db, user_id)
     if snapshot["total_available"] < amount:
-        raise ValueError("可用配额不足")
+        raise QuotaInsufficientError(
+            required_quota=amount,
+            available_quota=snapshot["total_available"],
+            pending_reserved=snapshot.get("pending_reserved", 0),
+        )
 
     remaining = amount
     breakdown = QuotaChargeBreakdown()
@@ -260,7 +337,7 @@ async def consume_quota(db: AsyncSession, user_id: UUID, amount: int) -> QuotaCh
     if remaining <= 0:
         return breakdown
 
-    packages = sorted(snapshot["packages"], key=lambda p: (p.expires_at is None, p.expires_at or datetime.max.replace(tzinfo=timezone.utc)))
+    packages = sort_quota_packages_for_consumption(snapshot["packages"])
     for package in packages:
         left = max(package.quota_total - package.quota_used, 0)
         use = min(left, remaining)

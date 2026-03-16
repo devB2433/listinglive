@@ -11,6 +11,13 @@ export const metadata: Metadata = {
     default: "ListingLive",
     template: "%s | ListingLive",
   },
+  icons: {
+    icon: [
+      { url: "/brand-mark.svg?v=2", type: "image/svg+xml" },
+    ],
+    shortcut: [{ url: "/brand-mark.svg?v=2", type: "image/svg+xml" }],
+    apple: [{ url: "/brand-mark.svg?v=2", type: "image/svg+xml" }],
+  },
   description:
     "Turn listing photos into dynamic showcase content with an AI workflow built for real estate teams. Canada's own AI tool for realtors.",
   openGraph: {

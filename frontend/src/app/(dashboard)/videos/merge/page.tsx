@@ -32,6 +32,7 @@ import {
   type PendingVideoDraftStatus,
   type StoredPendingVideoDraft,
 } from "@/lib/pending-video-task";
+import { getQuotaSubmissionState } from "@/lib/quota-flow";
 import { getCachedProfileCards, getCachedSceneTemplates, getCachedUserAvatars, getCachedUserLogos } from "@/lib/video-config-cache";
 
 type EditMode = "unified" | "custom";
@@ -155,6 +156,8 @@ export default function VideoMergePage() {
   const canEditAvatarPlacement = enableAvatar && !!selectedAvatar && supportsAvatarOverlay;
   const effectiveLogoPlacement = supportsLogoPositionCustomize ? logoPlacement : CORNER_PLACEMENTS.bottom_right;
   const previewBackgroundUrl = segments[0]?.previewUrl || "";
+  const quotaSubmissionState = getQuotaSubmissionState(Math.max(segments.length, 1), quota.schedulable_available);
+  const { requiredQuota, availableQuota, canSubmit: canSubmitWithQuota } = quotaSubmissionState;
   const currentOverlayPlacement =
     editingOverlayTarget === "avatar" ? avatarPlacement : editingOverlayTarget === "logo" ? effectiveLogoPlacement : null;
   const currentOverlayPlacementLabel =
@@ -966,6 +969,19 @@ function buildSegmentFileKey(file: File) {
       setCreating(false);
       setCreatingStage("");
     }
+  }
+
+  async function handleOpenBillingForQuota() {
+    const draft = await persistCurrentDraft("editing");
+    const params = new URLSearchParams({
+      returnTo: "/videos/merge",
+      resumeMode: "edit",
+      taskType: "long",
+    });
+    if (draft?.id) {
+      params.set("draft", draft.id);
+    }
+    router.push(`/billing?${params.toString()}`);
   }
 
   async function handleCancelCurrentTask() {
@@ -1861,6 +1877,41 @@ function buildSegmentFileKey(file: File) {
           {creatingStage && <p className="text-sm text-blue-600">{creatingStage}</p>}
           {formMessage && <p className="text-sm text-green-600">{formMessage}</p>}
           {formError && <p className="text-sm text-red-600">{formError}</p>}
+          {step === 3 && segments.length > 0 && !canSubmitWithQuota && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              <p className="font-medium">{translate("dashboard.billing.quotaInsufficientTitle")}</p>
+              <p className="mt-1">
+                {translate("dashboard.billing.quotaInsufficientSummary", {
+                  required: requiredQuota,
+                  available: availableQuota,
+                })}
+              </p>
+              {quota.pending_reserved > 0 ? (
+                <p className="mt-1 text-amber-800">
+                  {translate("dashboard.billing.quotaPendingReservedHint", { count: quota.pending_reserved })}
+                </p>
+              ) : null}
+              <p className="mt-1 text-amber-800">
+                {availableQuota > 0
+                  ? translate("dashboard.billing.quotaRemainingOptions", { count: availableQuota })
+                  : translate("dashboard.billing.quotaRemainingOptionsZero")}
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {quota.can_purchase_quota_package ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleOpenBillingForQuota()}
+                    className="rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700"
+                  >
+                    {translate("dashboard.billing.buyQuotaPackageAndReturn")}
+                  </button>
+                ) : null}
+                <Link href="/billing" className="rounded-md border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100">
+                  {translate("dashboard.nav.billing")}
+                </Link>
+              </div>
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center gap-3">
             {step > 1 && (
@@ -1886,10 +1937,14 @@ function buildSegmentFileKey(file: File) {
                 key="wizard-submit"
                 type="button"
                 onClick={() => void submitTask()}
-                disabled={creating || quota.total_available < Math.max(segments.length, 1)}
+                disabled={creating || !canSubmitWithQuota}
                 className="rounded-md bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:opacity-50"
               >
-                {creating ? translate("dashboard.longVideo.creating") : translate("dashboard.longVideo.create")}
+                {creating
+                  ? translate("dashboard.longVideo.creating")
+                  : canSubmitWithQuota
+                    ? translate("dashboard.longVideo.create")
+                    : translate("dashboard.shortVideo.noQuota")}
               </button>
             )}
             <button

@@ -11,29 +11,57 @@ import { getPosts } from "@/lib/blog-posts-meta";
 function ProofCountUp({ target = 403, suffix = "%", className = "" }: { target?: number; suffix?: string; className?: string }) {
   const [value, setValue] = useState(0);
   const ref = useRef<HTMLParagraphElement>(null);
-  const done = useRef(false);
+  const frameRef = useRef<number | null>(null);
+
   useEffect(() => {
-    if (!ref.current || done.current) return;
+    if (!ref.current) return;
+
     const el = ref.current;
+    const duration = 1000;
+
+    const stopAnimation = () => {
+      if (frameRef.current !== null) {
+        cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
+      }
+    };
+
+    const startAnimation = () => {
+      stopAnimation();
+      setValue(0);
+      const start = performance.now();
+      const step = (now: number) => {
+        const t = Math.min((now - start) / duration, 1);
+        const easeOut = 1 - (1 - t) ** 2;
+        setValue(Math.round(easeOut * target));
+        if (t < 1) {
+          frameRef.current = requestAnimationFrame(step);
+        } else {
+          frameRef.current = null;
+        }
+      };
+      frameRef.current = requestAnimationFrame(step);
+    };
+
     const observer = new IntersectionObserver(
       (entries) => {
-        if (!entries[0]?.isIntersecting || done.current) return;
-        done.current = true;
-        const start = performance.now();
-        const duration = 1000;
-        const step = (now: number) => {
-          const t = Math.min((now - start) / duration, 1);
-          const easeOut = 1 - (1 - t) ** 2;
-          setValue(Math.round(easeOut * target));
-          if (t < 1) requestAnimationFrame(step);
-        };
-        requestAnimationFrame(step);
+        if (entries[0]?.isIntersecting) {
+          startAnimation();
+        } else {
+          stopAnimation();
+          setValue(0);
+        }
       },
       { threshold: 0.2 }
     );
     observer.observe(el);
-    return () => observer.disconnect();
+
+    return () => {
+      observer.disconnect();
+      stopAnimation();
+    };
   }, [target]);
+
   return (
     <p ref={ref} className={`text-6xl font-extrabold leading-none sm:text-7xl md:text-8xl ${className}`}>
       {value}
@@ -137,9 +165,8 @@ export default function HomePage() {
       >
         <div className="container flex items-center justify-between">
           <Link href="/" className="flex items-center gap-2">
-            <div className="h-8 w-8 rounded-lg bg-gradient-primary flex items-center justify-center">
-              <span className="text-primary-foreground text-sm font-bold">L</span>
-            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/brand-mark.svg?v=2" alt="ListingLive" className="h-8 w-8 rounded-lg object-contain shrink-0" />
             <span className="text-lg font-bold text-foreground">{translate("common.brand")}</span>
           </Link>
           <nav className="hidden md:flex items-center gap-2">
@@ -189,7 +216,7 @@ export default function HomePage() {
               </h1>
             </ScrollReveal>
             <ScrollReveal delay={200}>
-              <p className="text-xl md:text-2xl text-foreground/70 text-center max-w-2xl mx-auto mb-10">
+              <p className="text-xl md:text-2xl text-foreground/70 text-center max-w-2xl md:max-w-none md:whitespace-nowrap mx-auto mb-10">
                 {translate("home.heroSubtitle")}
               </p>
             </ScrollReveal>
@@ -343,7 +370,6 @@ export default function HomePage() {
                 <p className="text-muted-foreground max-w-xl mx-auto">{translate("home.plans.subtitle")}</p>
               </div>
             </ScrollReveal>
-            <p className="text-center text-sm font-medium text-muted-foreground mb-8">{translate("home.socialProof")}</p>
             <div className="grid md:grid-cols-3 gap-6 max-w-5xl mx-auto">
               {planCards.map((plan, i) => (
                 <ScrollReveal key={plan.key} delay={i * 150}>
@@ -399,7 +425,6 @@ export default function HomePage() {
                   <span className="text-sm text-muted-foreground">{translate("home.plans.addonDetail")}</span>
                 </div>
                 <p className="text-xs text-muted-foreground mt-3">{translate("home.plans.note")}</p>
-                <p className="text-xs text-muted-foreground mt-2">{translate("home.trustLine")}</p>
               </div>
             </ScrollReveal>
           </div>
@@ -469,9 +494,8 @@ export default function HomePage() {
             <div className="grid md:grid-cols-4 gap-8">
               <div className="md:col-span-1">
                 <Link href="/" className="flex items-center gap-2 mb-4">
-                  <div className="h-8 w-8 rounded-lg bg-gradient-primary flex items-center justify-center">
-                    <span className="text-primary-foreground text-sm font-bold">L</span>
-                  </div>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src="/brand-mark.svg?v=2" alt="ListingLive" className="h-8 w-8 rounded-lg object-contain shrink-0" />
                   <span className="text-lg font-bold text-foreground">{translate("common.brand")}</span>
                 </Link>
                 <p className="text-sm text-muted-foreground leading-relaxed">

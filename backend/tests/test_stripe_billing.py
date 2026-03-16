@@ -23,6 +23,8 @@ class StripeBillingTests(unittest.TestCase):
             params = _build_managed_portal_configuration_params()
 
         self.assertEqual(params["features"]["subscription_update"]["default_allowed_updates"], ["price"])
+        self.assertEqual(params["features"]["subscription_update"]["proration_behavior"], "none")
+        self.assertEqual(params["features"]["subscription_update"]["billing_cycle_anchor"], "now")
         self.assertEqual(
             params["features"]["subscription_update"]["products"],
             [

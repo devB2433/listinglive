@@ -3,7 +3,8 @@ Stripe 计费同步服务
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
 
@@ -25,11 +26,18 @@ from backend.services.stripe_service import (
     create_subscription_checkout_session,
     create_subscription_update_confirm_session,
     get_or_create_customer_id,
+    list_active_customer_subscriptions,
     preview_subscription_price_change,
     retrieve_subscription,
 )
 
 ACTIVE_SUBSCRIPTION_STATUSES = {"active", "trialing", "past_due"}
+UPGRADE_CARRYOVER_PACKAGE_TYPE = "upgrade_carryover"
+SUBSCRIPTION_EFFECTIVE_IMMEDIATE = "immediate"
+SUBSCRIPTION_EFFECTIVE_DEFERRED = "deferred"
+READ_SYNC_COOLDOWN_SECONDS = 120
+_READ_SYNC_THROTTLE: dict[UUID, datetime] = {}
+logger = logging.getLogger(__name__)
 
 
 def _as_datetime(timestamp: int | None) -> datetime | None:
@@ -87,6 +95,28 @@ def _extract_subscription_price_id(subscription: Any) -> str | None:
     return _extract_id(price)
 
 
+def _extract_subscription_period(subscription: Any) -> tuple[datetime | None, datetime | None]:
+    if isinstance(subscription, dict):
+        top_start = subscription.get("current_period_start")
+        top_end = subscription.get("current_period_end")
+    else:
+        top_start = subscription["current_period_start"]
+        top_end = subscription["current_period_end"]
+
+    if top_start or top_end:
+        return _as_datetime(top_start), _as_datetime(top_end)
+
+    items = subscription.get("items", {}) if isinstance(subscription, dict) else subscription["items"]
+    data = items.get("data", []) if isinstance(items, dict) else items["data"]
+    if not data:
+        return None, None
+
+    first_item = data[0]
+    item_start = first_item.get("current_period_start") if isinstance(first_item, dict) else first_item["current_period_start"]
+    item_end = first_item.get("current_period_end") if isinstance(first_item, dict) else first_item["current_period_end"]
+    return _as_datetime(item_start), _as_datetime(item_end)
+
+
 def _extract_metadata(payload: Any) -> dict[str, str]:
     if isinstance(payload, dict):
         metadata = payload.get("metadata")
@@ -141,23 +171,171 @@ async def _get_plan_by_stripe_price_id(db: AsyncSession, stripe_price_id: str) -
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
+def _subscription_tier(plan_type: str | None) -> int:
+    if not plan_type:
+        return 0
+    return PLAN_TIER_ORDER.get(plan_type, 0)
+
+
+def _pick_canonical_subscription(
+    subscriptions: list[Subscription],
+    *,
+    preferred_subscription_id: str | None = None,
+) -> Subscription | None:
+    if not subscriptions:
+        return None
+
+    if preferred_subscription_id:
+        for subscription in subscriptions:
+            if subscription.stripe_subscription_id == preferred_subscription_id:
+                return subscription
+
+    return max(
+        subscriptions,
+        key=lambda sub: (
+            _subscription_tier(sub.plan_type),
+            sub.current_period_start or datetime.min.replace(tzinfo=timezone.utc),
+            sub.updated_at or sub.created_at or datetime.min.replace(tzinfo=timezone.utc),
+        ),
+    )
+
+
+async def _converge_user_active_subscriptions(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    event_id: str,
+    preferred_subscription_id: str | None = None,
+) -> Subscription | None:
+    active_stmt = select(Subscription).where(
+        Subscription.user_id == user_id,
+        Subscription.status.in_(ACTIVE_SUBSCRIPTION_STATUSES),
+        Subscription.stripe_subscription_id.is_not(None),
+    )
+    active_subscriptions = list((await db.execute(active_stmt)).scalars().all())
+    if len(active_subscriptions) <= 1:
+        return active_subscriptions[0] if active_subscriptions else None
+
+    canonical = _pick_canonical_subscription(
+        active_subscriptions,
+        preferred_subscription_id=preferred_subscription_id,
+    )
+    if canonical is None:
+        return None
+
+    now = datetime.now(timezone.utc)
+    for subscription in active_subscriptions:
+        if subscription.id == canonical.id:
+            continue
+        logger.warning(
+            "Converging duplicate active subscriptions user=%s keep=%s drop=%s event=%s",
+            str(user_id),
+            canonical.stripe_subscription_id,
+            subscription.stripe_subscription_id,
+            event_id,
+        )
+        subscription.status = "canceled"
+        subscription.canceled_at = now
+        subscription.cancel_at_period_end = True
+        subscription.stripe_subscription_id = None
+        subscription.last_stripe_event_id = event_id
+    await db.flush()
+    return canonical
+
+
+def _extract_subscription_status(subscription: Any) -> str:
+    if isinstance(subscription, dict):
+        return str(subscription.get("status") or "")
+    return str(getattr(subscription, "status", "") or "")
+
+
+def _extract_subscription_id(subscription: Any) -> str | None:
+    if isinstance(subscription, dict):
+        raw = subscription.get("id")
+        return str(raw) if raw else None
+    raw = getattr(subscription, "id", None)
+    return str(raw) if raw else None
+
+
+async def _sync_remote_active_subscriptions(
+    db: AsyncSession,
+    *,
+    user: User,
+    event_id: str,
+) -> list[Subscription]:
+    if not user.stripe_customer_id:
+        return []
+
+    remote_subscriptions = list_active_customer_subscriptions(user.stripe_customer_id)
+    synced: list[Subscription] = []
+    for remote in remote_subscriptions:
+        sub_id = _extract_subscription_id(remote)
+        if not sub_id:
+            continue
+        synced.append(await _sync_subscription_by_id(db, sub_id, event_id))
+    await _converge_user_active_subscriptions(db, user_id=user.id, event_id=event_id)
+    return synced
+
+
 async def _get_quota_package_plan_by_stripe_price_id(db: AsyncSession, stripe_price_id: str) -> QuotaPackagePlan | None:
     stmt = select(QuotaPackagePlan).where(QuotaPackagePlan.stripe_price_id == stripe_price_id)
     return (await db.execute(stmt)).scalar_one_or_none()
 
 
-async def create_subscription_checkout(db: AsyncSession, user: User, plan_id: UUID) -> str:
+async def create_subscription_checkout(
+    db: AsyncSession,
+    user: User,
+    plan_id: UUID,
+    *,
+    effective_strategy: str | None = None,
+) -> str:
     plan = await _get_plan_by_id(db, plan_id)
     if plan is None:
         raise AppError("billing.plan.notFound", status_code=404)
     if not plan.stripe_price_id:
         raise AppError("billing.plan.notConfigured", status_code=400)
 
+    if user.stripe_customer_id:
+        event_id = f"precheck:{user.id}:{datetime.now(timezone.utc).timestamp()}"
+        try:
+            await _sync_remote_active_subscriptions(db, user=user, event_id=event_id)
+        except Exception as exc:
+            logger.warning(
+                "Stripe precheck sync failed user=%s customer=%s: %s",
+                str(user.id),
+                user.stripe_customer_id,
+                exc,
+            )
+            await _converge_user_active_subscriptions(
+                db,
+                user_id=user.id,
+                event_id=f"{event_id}:local-fallback",
+            )
+
     context = await build_user_access_context(db, user.id)
-    if context.subscription_plan_type == plan.plan_type and context.subscription_is_billing_managed:
+    is_billing_managed = bool(getattr(context, "subscription_is_billing_managed", False))
+    is_local_trial = bool(getattr(context, "subscription_is_local_trial", False))
+    trial_expires_at = getattr(context, "trial_expires_at", None)
+    if context.subscription_plan_type == plan.plan_type and is_billing_managed:
         raise AppError("billing.subscription.alreadyActive", status_code=400)
-    if context.subscription_is_billing_managed:
+    if is_billing_managed:
         raise AppError("billing.subscription.manageExisting", status_code=400)
+
+    strategy = (effective_strategy or SUBSCRIPTION_EFFECTIVE_IMMEDIATE).strip().lower()
+    if strategy not in {SUBSCRIPTION_EFFECTIVE_IMMEDIATE, SUBSCRIPTION_EFFECTIVE_DEFERRED}:
+        raise AppError("billing.subscription.invalidEffectiveStrategy", status_code=400)
+    if is_local_trial and effective_strategy is None:
+        raise AppError("billing.subscription.effectiveStrategyRequired", status_code=400)
+    if strategy == SUBSCRIPTION_EFFECTIVE_DEFERRED and not is_local_trial:
+        raise AppError("billing.subscription.deferredOnlyForTrial", status_code=400)
+
+    trial_end_at: datetime | None = None
+    if strategy == SUBSCRIPTION_EFFECTIVE_DEFERRED:
+        trial_end_at = trial_expires_at
+        if trial_end_at is None:
+            raise AppError("billing.subscription.deferredOnlyForTrial", status_code=400)
+        if trial_end_at <= datetime.now(timezone.utc):
+            raise AppError("billing.subscription.trialAlreadyEnded", status_code=400)
 
     customer_id = await get_or_create_customer_id(db, user)
     return create_subscription_checkout_session(
@@ -166,6 +344,8 @@ async def create_subscription_checkout(db: AsyncSession, user: User, plan_id: UU
         user_id=str(user.id),
         plan_id=str(plan.id),
         plan_type=plan.plan_type,
+        effective_strategy=strategy,
+        trial_end_at=trial_end_at,
     )
 
 
@@ -263,7 +443,92 @@ def _extract_payment_intent(invoice: dict[str, Any] | None) -> dict[str, Any] | 
     return payment_intent if isinstance(payment_intent, dict) else None
 
 
-async def preview_upgrade_subscription(db: AsyncSession, user: User, target_plan_id: UUID) -> dict[str, Any]:
+def _validate_upgrade_effective_strategy(effective_strategy: str | None) -> str:
+    strategy = (effective_strategy or SUBSCRIPTION_EFFECTIVE_IMMEDIATE).strip().lower()
+    if strategy not in {SUBSCRIPTION_EFFECTIVE_IMMEDIATE, SUBSCRIPTION_EFFECTIVE_DEFERRED}:
+        raise AppError("billing.subscription.invalidEffectiveStrategy", status_code=400)
+    if strategy != SUBSCRIPTION_EFFECTIVE_IMMEDIATE:
+        raise AppError("billing.subscription.deferredNotSupportedForUpgrade", status_code=400)
+    return strategy
+
+
+def _build_upgrade_carryover_marker(
+    *,
+    stripe_subscription_id: str,
+    from_plan_type: str,
+    to_plan_type: str,
+    period_start: datetime | None,
+) -> str:
+    period_marker = period_start.isoformat() if period_start is not None else "none"
+    return f"upgrade-carryover:{stripe_subscription_id}:{from_plan_type}:{to_plan_type}:{period_marker}"
+
+
+async def _grant_upgrade_carryover_package(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    stripe_subscription_id: str,
+    from_plan_type: str,
+    to_plan_type: str,
+    old_quota_per_month: int,
+    old_quota_used: int,
+    period_start: datetime | None,
+    event_id: str,
+) -> QuotaPackage | None:
+    current_tier = PLAN_TIER_ORDER.get(from_plan_type, 0)
+    target_tier = PLAN_TIER_ORDER.get(to_plan_type, 0)
+    if target_tier <= current_tier:
+        return None
+
+    carryover_quota = max(int(old_quota_per_month) - int(old_quota_used), 0)
+    if carryover_quota <= 0:
+        return None
+
+    marker = _build_upgrade_carryover_marker(
+        stripe_subscription_id=stripe_subscription_id,
+        from_plan_type=from_plan_type,
+        to_plan_type=to_plan_type,
+        period_start=period_start,
+    )
+    existing = (
+        await db.execute(
+            select(QuotaPackage).where(
+                QuotaPackage.user_id == user_id,
+                QuotaPackage.package_type == UPGRADE_CARRYOVER_PACKAGE_TYPE,
+                QuotaPackage.stripe_checkout_session_id == marker,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    package = QuotaPackage(
+        user_id=user_id,
+        quota_package_plan_id=None,
+        package_type=UPGRADE_CARRYOVER_PACKAGE_TYPE,
+        quota_total=carryover_quota,
+        quota_used=0,
+        expires_at=None,
+        stripe_checkout_session_id=marker,
+        stripe_payment_intent_id=None,
+        stripe_price_id=None,
+        payment_status="paid",
+        last_stripe_event_id=event_id,
+    )
+    db.add(package)
+    await db.flush()
+    return package
+
+
+async def preview_upgrade_subscription(
+    db: AsyncSession,
+    user: User,
+    target_plan_id: UUID,
+    *,
+    effective_strategy: str | None = None,
+) -> dict[str, Any]:
+    strategy = _validate_upgrade_effective_strategy(effective_strategy)
+    await sync_subscription_state_on_read(db, user, force=True)
     subscription, target_plan = await _get_validated_upgrade_target(db, user, target_plan_id)
     customer_id = await get_or_create_customer_id(db, user)
     preview = preview_subscription_price_change(
@@ -279,10 +544,19 @@ async def preview_upgrade_subscription(db: AsyncSession, user: User, target_plan
         "amount_due_cents": _extract_amount_due(preview),
         "currency": _extract_currency(preview),
         "current_period_end": subscription.current_period_end,
+        "effective_strategy": strategy,
     }
 
 
-async def upgrade_subscription(db: AsyncSession, user: User, target_plan_id: UUID) -> dict[str, Any]:
+async def upgrade_subscription(
+    db: AsyncSession,
+    user: User,
+    target_plan_id: UUID,
+    *,
+    effective_strategy: str | None = None,
+) -> dict[str, Any]:
+    strategy = _validate_upgrade_effective_strategy(effective_strategy)
+    await sync_subscription_state_on_read(db, user, force=True)
     subscription, target_plan = await _get_validated_upgrade_target(db, user, target_plan_id)
     customer_id = await get_or_create_customer_id(db, user)
     confirmation_url = create_subscription_update_confirm_session(
@@ -292,6 +566,7 @@ async def upgrade_subscription(db: AsyncSession, user: User, target_plan_id: UUI
     )
     return {
         "result_status": "redirect_to_stripe",
+        "effective_strategy": strategy,
         "invoice_hosted_url": confirmation_url,
         "message": "subscription_update_confirm",
     }
@@ -310,11 +585,33 @@ async def _upsert_subscription_from_payload(db: AsyncSession, payload: Any, even
     if plan is None:
         raise AppError("billing.plan.notConfigured", status_code=400)
 
-    stmt = select(Subscription).where(Subscription.stripe_subscription_id == stripe_subscription_id)
-    subscription = (await db.execute(stmt)).scalar_one_or_none()
+    stmt = (
+        select(Subscription)
+        .where(Subscription.stripe_subscription_id == stripe_subscription_id)
+        .order_by(Subscription.updated_at.desc(), Subscription.created_at.desc())
+    )
+    subscriptions = list((await db.execute(stmt)).scalars().all())
+    subscription = subscriptions[0] if subscriptions else None
+    if len(subscriptions) > 1:
+        # Historical duplicate rows can exist when multiple Stripe events race.
+        # Keep the newest row as canonical and detach old duplicates from Stripe id.
+        for duplicate in subscriptions[1:]:
+            duplicate.status = "canceled"
+            duplicate.canceled_at = datetime.now(timezone.utc)
+            duplicate.cancel_at_period_end = True
+            duplicate.stripe_subscription_id = None
+            duplicate.last_stripe_event_id = event_id
+    previous_snapshot: dict[str, Any] | None = None
+    if subscription is not None:
+        previous_snapshot = {
+            "plan_type": subscription.plan_type,
+            "quota_per_month": subscription.quota_per_month,
+            "quota_used": subscription.quota_used,
+            "current_period_start": subscription.current_period_start,
+            "stripe_subscription_id": subscription.stripe_subscription_id,
+        }
 
-    period_start = _as_datetime(payload.get("current_period_start") if isinstance(payload, dict) else payload["current_period_start"])
-    period_end = _as_datetime(payload.get("current_period_end") if isinstance(payload, dict) else payload["current_period_end"])
+    period_start, period_end = _extract_subscription_period(payload)
     quota_used = compute_subscription_quota_used(
         subscription,
         plan_quota_per_month=plan.quota_per_month,
@@ -349,6 +646,24 @@ async def _upsert_subscription_from_payload(db: AsyncSession, payload: Any, even
     subscription.current_period_start = period_start
     subscription.current_period_end = period_end
     await db.flush()
+    await _converge_user_active_subscriptions(
+        db,
+        user_id=user.id,
+        event_id=event_id,
+        preferred_subscription_id=stripe_subscription_id,
+    )
+    if previous_snapshot is not None and previous_snapshot.get("stripe_subscription_id"):
+        await _grant_upgrade_carryover_package(
+            db,
+            user_id=user.id,
+            stripe_subscription_id=str(previous_snapshot["stripe_subscription_id"]),
+            from_plan_type=str(previous_snapshot["plan_type"]),
+            to_plan_type=subscription.plan_type,
+            old_quota_per_month=int(previous_snapshot["quota_per_month"]),
+            old_quota_used=int(previous_snapshot["quota_used"]),
+            period_start=previous_snapshot["current_period_start"],
+            event_id=event_id,
+        )
     return subscription
 
 
@@ -408,16 +723,46 @@ async def _sync_subscription_by_id(db: AsyncSession, subscription_id: str, event
     return await _upsert_subscription_from_payload(db, payload, event_id)
 
 
+async def sync_subscription_state_on_read(
+    db: AsyncSession,
+    user: User,
+    *,
+    force: bool = False,
+) -> None:
+    if not user.stripe_customer_id:
+        return
+
+    now = datetime.now(timezone.utc)
+    last_synced_at = _READ_SYNC_THROTTLE.get(user.id)
+    if not force and last_synced_at and now - last_synced_at < timedelta(seconds=READ_SYNC_COOLDOWN_SECONDS):
+        return
+    _READ_SYNC_THROTTLE[user.id] = now
+
+    event_id = f"read-sync:{user.id}:{now.timestamp()}"
+    try:
+        await _sync_remote_active_subscriptions(db, user=user, event_id=event_id)
+    except Exception as exc:
+        logger.warning(
+            "Read-side subscription sync failed user=%s customer=%s: %s",
+            str(user.id),
+            user.stripe_customer_id,
+            exc,
+        )
+        await _converge_user_active_subscriptions(
+            db,
+            user_id=user.id,
+            event_id=f"{event_id}:local-fallback",
+        )
+
+
 async def _handle_checkout_completed(db: AsyncSession, payload: Any, event_id: str) -> None:
     metadata = _extract_metadata(payload)
     mode = payload.get("mode") if isinstance(payload, dict) else payload["mode"]
     if mode == "payment" and metadata.get("billing_kind") == "quota_package":
         await _grant_quota_package_from_checkout_session(db, payload, event_id)
         return
-    if mode == "subscription":
-        subscription_id = _extract_id(payload.get("subscription") if isinstance(payload, dict) else payload["subscription"])
-        if subscription_id:
-            await _sync_subscription_by_id(db, subscription_id, event_id)
+    # For subscription checkout, rely on customer.subscription.* / invoice.* webhook
+    # events to avoid concurrent duplicate upserts for the same Stripe subscription.
 
 
 async def _handle_subscription_event(db: AsyncSession, payload: Any, event_id: str) -> None:

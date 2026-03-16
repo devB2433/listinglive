@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 
 import { useLocale } from "@/components/providers/locale-provider";
 import { useDashboardSession } from "@/components/providers/session-provider";
 import {
+  ApiError,
   createCustomerPortal,
   createQuotaPackageCheckout,
   createSubscriptionCheckout,
@@ -17,11 +19,13 @@ import {
   type QuotaPackagePlan,
   type SubscriptionPlan,
 } from "@/lib/api";
+import { saveBillingReturnIntent } from "@/lib/billing-return";
 import { getAccessTierLabel, getShortDurationSummary, getStorageDaysSummary } from "@/lib/capabilities";
 
 export default function BillingPage() {
   const { accessToken, quota, refreshQuota } = useDashboardSession();
-  const { formatDate, translate } = useLocale();
+  const { locale, formatDate, translate } = useLocale();
+  const searchParams = useSearchParams();
   const [subscriptionPlans, setSubscriptionPlans] = useState<SubscriptionPlan[]>([]);
   const [quotaPackagePlans, setQuotaPackagePlans] = useState<QuotaPackagePlan[]>([]);
   const [loadingCatalogs, setLoadingCatalogs] = useState(true);
@@ -33,6 +37,7 @@ export default function BillingPage() {
   const [upgradeRecoveryUrl, setUpgradeRecoveryUrl] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<string | null>(null);
   const [usageDetailExpanded, setUsageDetailExpanded] = useState(false);
+  const [trialSubscribeStrategy, setTrialSubscribeStrategy] = useState<Record<string, "immediate" | "deferred" | undefined>>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -87,6 +92,25 @@ export default function BillingPage() {
   const isLocalTrial = quota.subscription_is_local_trial;
   const PLAN_TIER_ORDER: Record<string, number> = { basic: 1, pro: 2, ultimate: 3 };
   const currentTier = PLAN_TIER_ORDER[quota.subscription_plan_type ?? ""] ?? 0;
+  const subscriptionStatusText = quota.subscription_status
+    ? renderSubscriptionStatus(translate, quota.subscription_status)
+    : null;
+  const hasPeriodRange = Boolean(quota.subscription_current_period_start && quota.subscription_current_period_end);
+  const formatDateOnly = (value: string | null) =>
+    value ? new Date(value).toLocaleDateString(locale === "en" ? "en-CA" : "zh-CN") : "-";
+  const billingReturnIntent = useMemo(() => {
+    const returnTo = searchParams.get("returnTo");
+    if (!returnTo) return null;
+    const resumeMode = searchParams.get("resumeMode");
+    const taskType = searchParams.get("taskType");
+    const draftId = searchParams.get("draft");
+    return {
+      returnTo,
+      draftId: draftId || undefined,
+      resumeMode: resumeMode === "submit" ? "submit" : "edit",
+      taskType: taskType === "long" ? "long" : taskType === "short" ? "short" : undefined,
+    } as const;
+  }, [searchParams]);
 
   async function redirectTo(url: string) {
     window.location.assign(url);
@@ -109,9 +133,25 @@ export default function BillingPage() {
     setPendingAction(actionKey);
     setActionError("");
     try {
-      const result = await createSubscriptionCheckout(accessToken, planId);
+      const strategy = trialSubscribeStrategy[planId];
+      if (isLocalTrial && !strategy) {
+        setActionError(translate("dashboard.billing.effectiveStrategyRequired"));
+        setPendingAction(null);
+        return;
+      }
+      const result = await createSubscriptionCheckout(accessToken, planId, strategy);
       await redirectTo(result.checkout_url);
     } catch (error) {
+      if (
+        error instanceof ApiError &&
+        (error.code === "billing.subscription.manageExisting" || error.code === "billing.subscription.alreadyActive")
+      ) {
+        try {
+          await refreshQuota();
+        } catch {
+          // Keep original error visible even if refresh fails.
+        }
+      }
       setActionError(error instanceof Error ? error.message : translate("common.requestFailed"));
       setPendingAction(null);
     }
@@ -122,6 +162,9 @@ export default function BillingPage() {
     setPendingAction(actionKey);
     setActionError("");
     try {
+      if (billingReturnIntent) {
+        saveBillingReturnIntent(billingReturnIntent);
+      }
       const result = await createQuotaPackageCheckout(accessToken, packagePlanId);
       const url = result?.checkout_url;
       if (!url || typeof url !== "string") {
@@ -215,24 +258,26 @@ export default function BillingPage() {
                 <p>{translate("dashboard.billing.inviteBonusDescription", { count: quota.invite_bonus_remaining })}</p>
               </div>
             )}
-            {isLocalTrial && quota.subscription_current_period_end && (
+            {isLocalTrial && quota.trial_expires_at && (
               <p className="mt-1 text-sm text-blue-700">
                 {translate("dashboard.billing.localTrialEnds", {
-                  value: formatDate(quota.subscription_current_period_end),
+                  value: formatDate(quota.trial_expires_at),
                 })}
               </p>
             )}
             {hasSubscription && (
               <>
-                {quota.subscription_cancel_at_period_end && (
-                  <p className="mt-1 text-sm text-amber-700">{translate("dashboard.billing.cancelAtPeriodEnd")}</p>
-                )}
-                {quota.subscription_current_period_end && (
+                {(subscriptionStatusText || hasPeriodRange) && (
                   <p className="mt-1 text-sm text-gray-600">
-                    {translate("dashboard.billing.currentPeriodEnd", {
-                      value: formatDate(quota.subscription_current_period_end),
+                    {translate("dashboard.billing.subscriptionStatusAndPeriod", {
+                      status: subscriptionStatusText ?? "-",
+                      start: formatDateOnly(quota.subscription_current_period_start),
+                      end: formatDateOnly(quota.subscription_current_period_end),
                     })}
                   </p>
+                )}
+                {quota.subscription_cancel_at_period_end && (
+                  <p className="mt-1 text-sm text-amber-700">{translate("dashboard.billing.cancelAtPeriodEnd")}</p>
                 )}
               </>
             )}
@@ -364,6 +409,41 @@ export default function BillingPage() {
                           : buttonLabel}
                       </button>
                     )}
+                    {!hasBillingManagedSubscription && isLocalTrial && !isCurrent && planTier > currentTier && (
+                      <div className="mt-3 rounded-md border border-blue-100 bg-blue-50/60 p-3 text-xs text-blue-800">
+                        <p className="font-medium">{translate("dashboard.billing.chooseEffectiveStrategy")}</p>
+                        <label className="mt-2 flex items-center gap-2">
+                          <input
+                            type="radio"
+                            name={`trial-strategy-${plan.id}`}
+                            checked={trialSubscribeStrategy[plan.id] === "immediate"}
+                            onChange={() =>
+                              setTrialSubscribeStrategy((prev) => ({ ...prev, [plan.id]: "immediate" }))
+                            }
+                          />
+                          <span>{translate("dashboard.billing.effectiveStrategyImmediate")}</span>
+                        </label>
+                        <label className="mt-1 flex items-center gap-2">
+                          <input
+                            type="radio"
+                            name={`trial-strategy-${plan.id}`}
+                            checked={trialSubscribeStrategy[plan.id] === "deferred"}
+                            onChange={() =>
+                              setTrialSubscribeStrategy((prev) => ({ ...prev, [plan.id]: "deferred" }))
+                            }
+                          />
+                          <span>{translate("dashboard.billing.effectiveStrategyDeferred")}</span>
+                        </label>
+                        <p className="mt-2 text-[11px] text-blue-700">
+                          {translate("dashboard.billing.effectiveStrategyHint")}
+                        </p>
+                      </div>
+                    )}
+                    {isUpgrade && quota.subscription_remaining > 0 ? (
+                      <p className="mt-2 text-xs text-blue-700">
+                        {translate("dashboard.billing.upgradeCarryoverHint", { value: quota.subscription_remaining })}
+                      </p>
+                    ) : null}
                   </div>
                 );
               })}
@@ -594,5 +674,17 @@ function renderBillingChargeStatus(
   if (status === "pending") return translate("dashboard.tasks.chargePending");
   if (status === "charged") return translate("dashboard.tasks.chargeCharged");
   if (status === "skipped") return translate("dashboard.tasks.chargeSkipped");
+  return status;
+}
+
+function renderSubscriptionStatus(
+  translate: (key: string, vars?: Record<string, string | number>) => string,
+  status: string,
+) {
+  if (status === "active") return translate("dashboard.billing.subscriptionStatusActive");
+  if (status === "trialing") return translate("dashboard.billing.subscriptionStatusTrialing");
+  if (status === "past_due") return translate("dashboard.billing.subscriptionStatusPastDue");
+  if (status === "canceled") return translate("dashboard.billing.subscriptionStatusCanceled");
+  if (status === "incomplete") return translate("dashboard.billing.subscriptionStatusIncomplete");
   return status;
 }

@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from backend.services.entitlement_service import build_access_context_from_snapshot, has_capability
@@ -145,6 +146,25 @@ class EntitlementServiceTests(unittest.TestCase):
         self.assertTrue(has_capability(context, "short_video_create"))
         self.assertFalse(has_capability(context, "merge_per_image_template"))
         self.assertFalse(context.limits.short_duration_editable)
+
+    def test_local_trial_exposes_trial_expiry_but_not_subscription_period(self) -> None:
+        period_end = datetime(2026, 3, 20, 10, 29, 34, tzinfo=timezone.utc)
+        context = build_access_context_from_snapshot(
+            {
+                "subscription": SimpleNamespace(plan_type="pro", status="trialing", storage_days=30, current_period_end=period_end),
+                "subscription_is_local_trial": True,
+                "subscription_is_billing_managed": False,
+                "subscription_remaining": 0,
+                "package_remaining": 5,
+                "paid_package_remaining": 0,
+                "signup_bonus_remaining": 5,
+                "invite_bonus_remaining": 0,
+                "total_available": 5,
+            }
+        )
+
+        self.assertEqual(context.trial_expires_at, period_end)
+        self.assertEqual(context.subscription_current_period_end, period_end)
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ from backend.services.billing_service import (
     create_subscription_checkout,
     preview_upgrade_subscription,
     process_webhook_payload,
+    sync_subscription_state_on_read,
     upgrade_subscription,
 )
 from backend.services.entitlement_service import build_user_access_context
@@ -73,6 +74,7 @@ async def get_my_quota(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> QuotaSnapshotOut:
+    await sync_subscription_state_on_read(db, user)
     context = await build_user_access_context(db, user.id)
     return QuotaSnapshotOut(
         subscription_plan_type=context.subscription_plan_type,
@@ -80,6 +82,8 @@ async def get_my_quota(
         subscription_is_local_trial=context.subscription_is_local_trial,
         subscription_is_billing_managed=context.subscription_is_billing_managed,
         subscription_cancel_at_period_end=context.subscription_cancel_at_period_end,
+        trial_expires_at=context.trial_expires_at,
+        subscription_current_period_start=context.subscription_current_period_start,
         subscription_current_period_end=context.subscription_current_period_end,
         subscription_remaining=context.subscription_remaining,
         package_remaining=context.package_remaining,
@@ -87,6 +91,8 @@ async def get_my_quota(
         signup_bonus_remaining=context.signup_bonus_remaining,
         invite_bonus_remaining=context.invite_bonus_remaining,
         total_available=context.total_available,
+        pending_reserved=context.pending_reserved,
+        schedulable_available=context.schedulable_available,
         access_tier=context.access_tier,
         capabilities=list(context.capabilities),
         can_purchase_quota_package=context.can_purchase_quota_package,
@@ -139,7 +145,12 @@ async def create_subscription_checkout_session(
     db: AsyncSession = Depends(get_db),
 ) -> CheckoutSessionOut:
     try:
-        checkout_url = await create_subscription_checkout(db, user, body.plan_id)
+        checkout_url = await create_subscription_checkout(
+            db,
+            user,
+            body.plan_id,
+            effective_strategy=body.effective_strategy,
+        )
         await db.commit()
         return CheckoutSessionOut(checkout_url=checkout_url)
     except AppError as exc:
@@ -171,7 +182,12 @@ async def preview_upgrade_subscription_plan(
     db: AsyncSession = Depends(get_db),
 ) -> UpgradeSubscriptionPreviewOut:
     try:
-        preview = await preview_upgrade_subscription(db, user, body.plan_id)
+        preview = await preview_upgrade_subscription(
+            db,
+            user,
+            body.plan_id,
+            effective_strategy=body.effective_strategy,
+        )
         await db.commit()
         return UpgradeSubscriptionPreviewOut(**preview)
     except AppError as exc:
@@ -187,7 +203,12 @@ async def upgrade_subscription_plan(
     db: AsyncSession = Depends(get_db),
 ) -> UpgradeSubscriptionOut:
     try:
-        result = await upgrade_subscription(db, user, body.plan_id)
+        result = await upgrade_subscription(
+            db,
+            user,
+            body.plan_id,
+            effective_strategy=body.effective_strategy,
+        )
         await db.commit()
         return UpgradeSubscriptionOut(**result)
     except AppError as exc:

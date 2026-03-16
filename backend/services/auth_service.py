@@ -10,7 +10,7 @@ from uuid import UUID
 import bcrypt
 from jose import JWTError, jwt
 from redis.asyncio import Redis
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.api_errors import AppError
@@ -33,7 +33,24 @@ def _hash_password(password: str) -> str:
 
 
 def _exclude_archived_users(stmt):
-    return stmt.where(User.status != UserStatus.ARCHIVED.value)
+    archived = UserStatus.ARCHIVED.value
+    normalized_status = func.lower(func.trim(func.coalesce(User.status, "")))
+    return stmt.where(normalized_status != archived)
+
+
+async def _normalize_archived_status_values(db: AsyncSession) -> None:
+    """
+    历史脏数据兼容：
+    统一把 ARCHIVED / archived<spaces> 归一化为 archived，
+    避免注册重名判断把已归档用户当作占用。
+    """
+    archived = UserStatus.ARCHIVED.value
+    normalized_status = func.lower(func.trim(func.coalesce(User.status, "")))
+    await db.execute(
+        update(User)
+        .where(normalized_status == archived, User.status != archived)
+        .values(status=archived)
+    )
 
 
 def _verify_password(password: str, password_hash: str) -> bool:
@@ -113,6 +130,7 @@ async def register(
     invite_code: str,
 ) -> User:
     """注册：校验验证码后创建用户。"""
+    await _normalize_archived_status_values(db)
     username = _normalize_auth_identity(username)
     email = _normalize_auth_identity(email)
     if not username:

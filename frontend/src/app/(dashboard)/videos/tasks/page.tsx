@@ -18,7 +18,9 @@ import {
   type VideoTask,
 } from "@/lib/api";
 import { InfoTooltip } from "@/components/ui/field-help";
+import { getStoredLocale, translateApiError } from "@/lib/locale";
 import { deletePendingVideoDraft, getPendingVideoDraft, savePendingVideoDraft, type PendingVideoDraft, type StoredPendingVideoDraft } from "@/lib/pending-video-task";
+import { canRetryVideoTask } from "@/lib/task-retry";
 
 type UserFacingTaskStatus = "uploading" | "queued" | "creating" | "post_processing" | "completed" | "failed";
 type TaskFilter = "all" | UserFacingTaskStatus;
@@ -43,7 +45,7 @@ type PendingTaskView = {
 type TaskListEntry = { kind: "pending"; task: PendingTaskView } | { kind: "task"; task: VideoTask };
 
 export default function VideoTasksPage() {
-  const { accessToken, refreshQuota } = useDashboardSession();
+  const { accessToken, quota, refreshQuota } = useDashboardSession();
   const { translate } = useLocale();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -214,7 +216,12 @@ export default function VideoTasksPage() {
         await savePendingVideoDraft({ ...draft, status: "auth_required" });
         throw error;
       }
-      await deletePendingVideoDraft(draft.id);
+      const isQuotaInsufficient = error instanceof ApiError && error.code === "billing.quota.insufficient";
+      if (isQuotaInsufficient) {
+        await savePendingVideoDraft({ ...draft, status: "ready" });
+      } else {
+        await deletePendingVideoDraft(draft.id);
+      }
       router.replace("/videos/tasks");
       setPendingTasks((current) =>
         current.map((item) =>
@@ -341,6 +348,20 @@ export default function VideoTasksPage() {
     pendingSubmitControllersRef.current.get(taskId)?.abort();
   }
 
+  async function handlePurchaseQuotaForDraft(task: PendingTaskView) {
+    const draft = await getPendingVideoDraft(task.id);
+    if (draft) {
+      await savePendingVideoDraft({ ...draft, status: "ready" });
+    }
+    const params = new URLSearchParams({
+      returnTo: `/videos/tasks?draft=${encodeURIComponent(task.id)}`,
+      resumeMode: "submit",
+      taskType: task.task_type,
+      draft: task.id,
+    });
+    router.push(`/billing?${params.toString()}`);
+  }
+
   if (loading && pendingTasks.length === 0) {
     return <PageLoading text={translate("dashboard.tasks.loading")} />;
   }
@@ -410,7 +431,9 @@ export default function VideoTasksPage() {
               task={entry.task}
               translate={translate}
               cancellingTaskId={cancellingPendingTaskId}
+              canPurchaseQuotaPackage={quota.can_purchase_quota_package}
               onCancel={handleCancelPendingTask}
+              onPurchaseQuota={handlePurchaseQuotaForDraft}
             />
           ) : (
             <TaskCard
@@ -433,12 +456,16 @@ function PendingTaskCard({
   task,
   translate,
   cancellingTaskId,
+  canPurchaseQuotaPackage,
   onCancel,
+  onPurchaseQuota,
 }: {
   task: PendingTaskView;
   translate: (key: string, params?: Record<string, string | number>) => string;
   cancellingTaskId: string;
+  canPurchaseQuotaPackage: boolean;
   onCancel: (taskId: string) => void;
+  onPurchaseQuota: (task: PendingTaskView) => Promise<void>;
 }) {
   return (
     <div className="rounded-2xl border bg-white p-4">
@@ -470,6 +497,17 @@ function PendingTaskCard({
         <p>{translate("dashboard.tasks.chargeStatusLabel", { value: translate("dashboard.tasks.chargePending") })}</p>
         <TaskErrorBlock translate={translate} errorCode={task.error_code} errorMessage={task.error_message} />
       </div>
+      {task.status === "failed" && task.error_code === "billing.quota.insufficient" && canPurchaseQuotaPackage ? (
+        <div className="mt-4">
+          <button
+            type="button"
+            onClick={() => void onPurchaseQuota(task)}
+            className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 hover:bg-amber-100"
+          >
+            {translate("dashboard.billing.buyQuotaPackageAndReturn")}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -490,11 +528,7 @@ function TaskCard({
   onRetry: (task: VideoTask) => Promise<void>;
 }) {
   const hasFailedLongSegments = task.task_type === "long" && !!task.long_segments?.some((segment) => segment.status === "failed");
-  const hasRetryableLongSegments =
-    task.task_type === "long" && !!task.long_segments?.some((segment) => segment.status === "failed" && segment.error_retryable !== false);
-  const canRetry =
-    (task.status === "failed" && task.error_retryable !== false) ||
-    hasRetryableLongSegments;
+  const canRetry = canRetryVideoTask(task);
 
   return (
     <div className="rounded-2xl border bg-white p-4">
@@ -681,7 +715,11 @@ function resolveTaskErrorDisplay(
   errorCode?: string | null,
   errorMessage?: string | null,
 ) {
-  const title = errorCode ?? (errorMessage?.includes(".") ? errorMessage : "legacy.unstructured_error");
+  const locale = getStoredLocale();
+  const translatedCode = errorCode ? translateApiError(errorCode, locale) : undefined;
+  const translatedMessageCode =
+    errorMessage && errorMessage.includes(".") ? translateApiError(errorMessage, locale) : undefined;
+  const title = translatedCode ?? translatedMessageCode ?? errorMessage ?? errorCode ?? "";
   return { title };
 }
 
@@ -701,7 +739,7 @@ function TaskErrorBlock({
   return (
     <div className="text-xs text-red-600">
       <p className="break-all">
-        {translate("common.error")}：{title}
+        {translate("common.error")}：{title || translate("common.requestFailed")}
       </p>
     </div>
   );
@@ -763,7 +801,7 @@ function TaskErrorInline({
   errorMessage?: string | null;
 }) {
   const { title } = resolveTaskErrorDisplay(errorCode, errorMessage);
-  return <p className="break-all text-[11px] text-red-600">{translate("common.error")}：{title}</p>;
+  return <p className="break-all text-[11px] text-red-600">{translate("common.error")}：{title || translate("common.requestFailed")}</p>;
 }
 
 function renderSegmentStatus(translate: (key: string) => string, status: string) {

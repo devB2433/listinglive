@@ -15,6 +15,7 @@ from backend.services.video_service import (
     get_task_stale_seconds,
     is_retryable_provider_error,
     is_task_stale,
+    TaskFailureInfo,
 )
 
 
@@ -84,7 +85,7 @@ def test_build_task_failure_info_preserves_app_error_code() -> None:
     assert failure.code == "videos.task.queueUnavailable"
     assert failure.source == TASK_ERROR_SOURCE_QUEUE
     assert failure.retryable is True
-    assert failure.message == "videos.task.queueUnavailable"
+    assert failure.message.startswith("任务队列暂时不可用 [videos.task.queueUnavailable]")
 
 
 def test_build_task_failure_info_wraps_plain_message_with_fallback_code() -> None:
@@ -105,6 +106,16 @@ def test_build_task_failure_info_maps_runtime_timeout_message() -> None:
     assert failure.retryable is True
 
 
+def test_build_task_failure_info_maps_missing_provider_api_key_message() -> None:
+    failure = build_task_failure_info(RuntimeError("`video.api_key` 是远端 provider 的必填项"))
+
+    assert failure.code == "videos.provider.apiKeyMissing"
+    assert failure.source == TASK_ERROR_SOURCE_PROVIDER
+    assert failure.detail == "`video.api_key` 是远端 provider 的必填项"
+    assert failure.retryable is False
+    assert failure.message.startswith("远端视频服务配置缺失（video.api_key 未设置） [videos.provider.apiKeyMissing]")
+
+
 def test_build_task_failure_info_uses_internal_fallback_for_unknown_exception() -> None:
     failure = build_task_failure_info(Exception("boom"))
 
@@ -112,6 +123,7 @@ def test_build_task_failure_info_uses_internal_fallback_for_unknown_exception() 
     assert failure.source == TASK_ERROR_SOURCE_INTERNAL
     assert failure.detail == "boom"
     assert failure.retryable is True
+    assert failure.message.startswith("系统内部错误 [videos.internal.unexpected] - boom")
 
 
 def test_build_task_failure_info_maps_missing_greenlet_to_async_context_code() -> None:
@@ -120,6 +132,7 @@ def test_build_task_failure_info_maps_missing_greenlet_to_async_context_code() -
     assert failure.code == "videos.internal.asyncContext"
     assert failure.source == TASK_ERROR_SOURCE_INTERNAL
     assert failure.retryable is False
+    assert failure.message.startswith("系统内部异步上下文错误 [videos.internal.asyncContext]")
 
 
 def test_build_task_failure_info_maps_sqlalchemy_errors_to_persistence_failed() -> None:
@@ -129,3 +142,17 @@ def test_build_task_failure_info_maps_sqlalchemy_errors_to_persistence_failed() 
     assert failure.source == TASK_ERROR_SOURCE_INTERNAL
     assert failure.detail == "db write failed"
     assert failure.retryable is False
+
+
+def test_build_task_failure_info_keeps_human_message_when_already_descriptive() -> None:
+    failure = build_task_failure_info(
+        TaskFailureInfo(
+            code="videos.provider.failed",
+            source=TASK_ERROR_SOURCE_PROVIDER,
+            detail="remote job failed",
+            retryable=True,
+            message="远端任务失败，请检查 provider 控制台。",
+        )
+    )
+
+    assert failure.message == "远端任务失败，请检查 provider 控制台。"

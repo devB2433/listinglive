@@ -3,6 +3,7 @@
 """
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 from typing import Optional
 from uuid import UUID
 
@@ -49,6 +50,8 @@ class QuotaSnapshotOut(BaseModel):
     subscription_is_local_trial: bool = False
     subscription_is_billing_managed: bool = False
     subscription_cancel_at_period_end: bool = False
+    trial_expires_at: Optional[datetime] = None
+    subscription_current_period_start: Optional[datetime] = None
     subscription_current_period_end: Optional[datetime] = None
     subscription_remaining: int
     package_remaining: int
@@ -56,6 +59,8 @@ class QuotaSnapshotOut(BaseModel):
     signup_bonus_remaining: int
     invite_bonus_remaining: int
     total_available: int
+    pending_reserved: int
+    schedulable_available: int
     access_tier: str
     capabilities: list[str]
     can_purchase_quota_package: bool
@@ -64,6 +69,7 @@ class QuotaSnapshotOut(BaseModel):
 
 class CreateSubscriptionCheckoutRequest(BaseModel):
     plan_id: UUID
+    effective_strategy: Optional[Literal["immediate", "deferred"]] = None
 
 
 class CreateQuotaPackageCheckoutRequest(BaseModel):
@@ -80,6 +86,7 @@ class CustomerPortalOut(BaseModel):
 
 class UpgradeSubscriptionRequest(BaseModel):
     plan_id: UUID
+    effective_strategy: Optional[Literal["immediate", "deferred"]] = None
 
 
 class UpgradeSubscriptionPreviewOut(BaseModel):
@@ -94,6 +101,7 @@ class UpgradeSubscriptionPreviewOut(BaseModel):
 
 class UpgradeSubscriptionOut(BaseModel):
     result_status: str
+    effective_strategy: Optional[str] = None
     invoice_hosted_url: Optional[str] = None
     message: Optional[str] = None
     plan_type: Optional[str] = None

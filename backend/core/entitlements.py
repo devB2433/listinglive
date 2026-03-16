@@ -88,6 +88,8 @@ class AccessContext:
     subscription_is_local_trial: bool
     subscription_is_billing_managed: bool
     subscription_cancel_at_period_end: bool
+    trial_expires_at: datetime | None
+    subscription_current_period_start: datetime | None
     subscription_current_period_end: datetime | None
     subscription_remaining: int
     package_remaining: int
@@ -95,6 +97,8 @@ class AccessContext:
     signup_bonus_remaining: int
     invite_bonus_remaining: int
     total_available: int
+    pending_reserved: int
+    schedulable_available: int
     capabilities: tuple[str, ...]
     limits: CapabilityLimits
     can_purchase_quota_package: bool

@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 from backend.services.quota_service import (
     LOCAL_SIGNUP_TRIAL_DAYS,
+    QuotaInsufficientError,
+    consume_quota,
     ensure_signup_pro_trial_subscription,
     is_local_trial_subscription,
     pick_current_subscription,
@@ -128,3 +130,63 @@ class SignupTrialQuotaTests(unittest.IsolatedAsyncioTestCase):
             subscription.current_period_end - subscription.current_period_start,
             timedelta(days=LOCAL_SIGNUP_TRIAL_DAYS),
         )
+
+
+class QuotaConsumptionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_consume_quota_uses_subscription_before_paid_package_and_bonus(self) -> None:
+        subscription = SimpleNamespace(quota_per_month=2, quota_used=0)
+        signup_bonus_package = SimpleNamespace(
+            package_type="signup_bonus",
+            quota_total=5,
+            quota_used=0,
+            expires_at=None,
+            created_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+        )
+        paid_package = SimpleNamespace(
+            package_type="pack_10",
+            quota_total=10,
+            quota_used=0,
+            expires_at=None,
+            created_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
+        )
+        db = AsyncMock()
+
+        with unittest.mock.patch(
+            "backend.services.quota_service.get_quota_snapshot",
+            AsyncMock(
+                return_value={
+                    "subscription": subscription,
+                    "total_available": 17,
+                    "pending_reserved": 0,
+                    "packages": [signup_bonus_package, paid_package],
+                }
+            ),
+        ):
+            breakdown = await consume_quota(db, "user-1", 4)
+
+        self.assertEqual(subscription.quota_used, 2)
+        self.assertEqual(paid_package.quota_used, 2)
+        self.assertEqual(signup_bonus_package.quota_used, 0)
+        self.assertEqual(breakdown.subscription_used, 2)
+        self.assertEqual(breakdown.paid_package_used, 2)
+        self.assertEqual(breakdown.signup_bonus_used, 0)
+
+    async def test_consume_quota_raises_structured_error_when_total_available_is_insufficient(self) -> None:
+        db = AsyncMock()
+        with unittest.mock.patch(
+            "backend.services.quota_service.get_quota_snapshot",
+            AsyncMock(
+                return_value={
+                    "subscription": None,
+                    "total_available": 2,
+                    "pending_reserved": 0,
+                    "packages": [],
+                }
+            ),
+        ):
+            with self.assertRaises(QuotaInsufficientError) as ctx:
+                await consume_quota(db, "user-1", 4)
+
+        self.assertEqual(ctx.exception.code, "billing.quota.insufficient")
+        self.assertEqual(ctx.exception.required_quota, 4)
+        self.assertEqual(ctx.exception.available_quota, 2)

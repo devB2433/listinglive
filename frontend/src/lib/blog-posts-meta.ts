@@ -15,6 +15,14 @@ export type BlogPostMeta = {
 
 export const BLOG_POSTS: BlogPostMeta[] = [
   {
+    slug: "one-video-one-brand-system",
+    title: "One Video, One Brand: Build a Consistent Personal IP That Clients Remember",
+    date: "2026-03-16",
+    sourceFile: "one-video-one-brand-system.md",
+    summary:
+      "A practical guide to personal-brand consistency in real estate videos: combine avatar, logo, profile card, and listing visuals into one coherent output, while keeping room for high customization.",
+  },
+  {
     slug: "who-i-am",
     title: "Who I Am",
     date: "2026-03-01",

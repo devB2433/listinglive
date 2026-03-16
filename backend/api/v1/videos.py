@@ -16,6 +16,7 @@ from backend.schemas.video import (
     CreateLongVideoTaskRequest,
     CreateShortVideoTaskRequest,
     ProfileCardOut,
+    RenameLogoRequest,
     SceneTemplateOut,
     UploadFileResponse,
     UploadAvatarResponse,
@@ -47,6 +48,7 @@ from backend.services.video_service import (
     list_user_avatars,
     list_user_logos,
     list_video_tasks_for_user,
+    rename_logo_asset,
     retry_video_task,
     save_image_upload,
     set_default_avatar,
@@ -71,6 +73,14 @@ def error_detail(code: str, message: str | None = None) -> dict:
     if message:
         detail["message"] = message
     return detail
+
+
+def app_error_detail(exc: AppError) -> dict:
+    if hasattr(exc, "to_detail"):
+        detail = exc.to_detail()
+        if isinstance(detail, dict):
+            return detail
+    return {"code": exc.code}
 
 
 @router.get("/scene-templates", response_model=list[SceneTemplateOut])
@@ -109,7 +119,7 @@ async def upload_image(
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
     except AppError as exc:
-        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+        raise HTTPException(status_code=exc.status_code, detail=app_error_detail(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=error_detail("videos.validation.invalidState", str(exc)))
 
@@ -216,6 +226,21 @@ async def set_logo_as_default(
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=error_detail("videos.resource.notFound", str(exc)))
+
+
+@router.patch("/logos/{logo_id}", response_model=UserLogoOut)
+async def rename_logo(
+    logo_id: UUID,
+    body: RenameLogoRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> UserLogoOut:
+    try:
+        return await rename_logo_asset(db, user.id, logo_id, body.name)
+    except AppError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=error_detail("videos.validation.invalidState", str(exc)))
 
 
 @router.post("/avatars/{avatar_id}/default", response_model=UserAvatarOut)
@@ -346,7 +371,7 @@ async def create_short_task(
     except PermissionDeniedError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
     except AppError as exc:
-        raise HTTPException(status_code=exc.status_code, detail={"code": exc.code})
+        raise HTTPException(status_code=exc.status_code, detail=app_error_detail(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=error_detail("videos.validation.invalidState", str(exc)))
 

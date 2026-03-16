@@ -208,6 +208,63 @@ def infer_task_error_retryable(error_code: str | None, source: str) -> bool:
     return False
 
 
+def summarize_task_failure_message(
+    *,
+    code: str,
+    source: str,
+    detail: str | None,
+    fallback_message: str | None,
+) -> str:
+    if fallback_message and not fallback_message.startswith(("videos.", "billing.", "auth.")):
+        return fallback_message
+
+    source_prefix = {
+        TASK_ERROR_SOURCE_INTERNAL: "系统内部错误",
+        TASK_ERROR_SOURCE_QUEUE: "任务排队/调度失败",
+        TASK_ERROR_SOURCE_PROVIDER: "远端视频服务失败",
+        TASK_ERROR_SOURCE_MERGE: "视频后处理失败",
+        TASK_ERROR_SOURCE_STORAGE: "存储读写失败",
+        TASK_ERROR_SOURCE_BILLING: "计费处理失败",
+        TASK_ERROR_SOURCE_AUTH: "鉴权失败",
+        TASK_ERROR_SOURCE_VALIDATION: "请求校验失败",
+    }.get(source, "任务处理失败")
+
+    if code == "videos.provider.apiKeyMissing":
+        base = "远端视频服务配置缺失（video.api_key 未设置）"
+    elif code == "videos.internal.asyncContext":
+        base = "系统内部异步上下文错误"
+    elif code == "videos.task.queueUnavailable":
+        base = "任务队列暂时不可用"
+    elif code == "videos.provider.timeout":
+        base = "远端视频服务超时"
+    elif code == "videos.provider.failed":
+        base = "远端视频服务返回失败"
+    else:
+        base = source_prefix
+
+    normalized_detail = (detail or "").strip()
+    if normalized_detail and normalized_detail != code:
+        return f"{base} [{code}] - {normalized_detail}"
+    return f"{base} [{code}]"
+
+
+def normalize_task_failure_info(failure: TaskFailureInfo) -> TaskFailureInfo:
+    resolved_source = failure.source or classify_task_error_source(failure.code)
+    resolved_retryable = failure.retryable if failure.retryable is not None else infer_task_error_retryable(failure.code, resolved_source)
+    return TaskFailureInfo(
+        code=failure.code,
+        source=resolved_source,
+        detail=failure.detail,
+        retryable=resolved_retryable,
+        message=summarize_task_failure_message(
+            code=failure.code,
+            source=resolved_source,
+            detail=failure.detail,
+            fallback_message=failure.message,
+        ),
+    )
+
+
 def clear_task_error_state(task: VideoTask) -> None:
     task.error_code = None
     task.error_source = None
@@ -258,71 +315,71 @@ def build_task_failure_info(
     retryable_hint: bool | None = None,
 ) -> TaskFailureInfo:
     if isinstance(error, TaskFailureInfo):
-        resolved_source = error.source or classify_task_error_source(error.code)
-        resolved_retryable = error.retryable if error.retryable is not None else infer_task_error_retryable(error.code, resolved_source)
-        return TaskFailureInfo(
-            code=error.code,
-            source=resolved_source,
-            detail=error.detail,
-            retryable=resolved_retryable,
-            message=error.message,
-        )
+        return normalize_task_failure_info(error)
 
     if isinstance(error, (AppError, PermissionDeniedError)):
         code = error.code
         source = source_hint or classify_task_error_source(code)
         retryable = retryable_hint if retryable_hint is not None else infer_task_error_retryable(code, source)
-        return TaskFailureInfo(code=code, source=source, detail=detail_hint, retryable=retryable, message=code)
+        return normalize_task_failure_info(TaskFailureInfo(code=code, source=source, detail=detail_hint, retryable=retryable, message=code))
 
     if isinstance(error, str):
         if error.startswith(("videos.", "billing.", "auth.")):
             code = error
             source = source_hint or classify_task_error_source(code)
             retryable = retryable_hint if retryable_hint is not None else infer_task_error_retryable(code, source)
-            return TaskFailureInfo(code=code, source=source, detail=detail_hint, retryable=retryable, message=code)
+            return normalize_task_failure_info(TaskFailureInfo(code=code, source=source, detail=detail_hint, retryable=retryable, message=code))
         source = source_hint or classify_task_error_source(fallback_code)
         retryable = retryable_hint if retryable_hint is not None else infer_task_error_retryable(fallback_code, source)
-        return TaskFailureInfo(code=fallback_code, source=source, detail=error, retryable=retryable, message=fallback_code)
+        return normalize_task_failure_info(TaskFailureInfo(code=fallback_code, source=source, detail=error, retryable=retryable, message=fallback_code))
 
     if isinstance(error, RuntimeError):
         message = str(error)
         if "greenlet_spawn has not been called" in message or "await_only()" in message:
-            return TaskFailureInfo(
+            return normalize_task_failure_info(TaskFailureInfo(
                 code="videos.internal.asyncContext",
                 source=source_hint or TASK_ERROR_SOURCE_INTERNAL,
                 detail=message,
                 retryable=False if retryable_hint is None else retryable_hint,
                 message="videos.internal.asyncContext",
-            )
+            ))
+        if "video.api_key" in message and "必填项" in message:
+            return normalize_task_failure_info(TaskFailureInfo(
+                code="videos.provider.apiKeyMissing",
+                source=TASK_ERROR_SOURCE_PROVIDER,
+                detail=message,
+                retryable=False if retryable_hint is None else retryable_hint,
+                message="videos.provider.apiKeyMissing",
+            ))
         if message.startswith(("videos.", "billing.", "auth.")):
             code = message
             source = source_hint or classify_task_error_source(code)
             retryable = retryable_hint if retryable_hint is not None else infer_task_error_retryable(code, source)
-            return TaskFailureInfo(code=code, source=source, detail=detail_hint, retryable=retryable, message=code)
+            return normalize_task_failure_info(TaskFailureInfo(code=code, source=source, detail=detail_hint, retryable=retryable, message=code))
         if "轮询超时" in message:
-            return TaskFailureInfo(
+            return normalize_task_failure_info(TaskFailureInfo(
                 code="videos.provider.timeout",
                 source=source_hint or TASK_ERROR_SOURCE_PROVIDER,
                 detail=message,
                 retryable=True if retryable_hint is None else retryable_hint,
                 message="videos.provider.timeout",
-            )
+            ))
         if "未返回可下载的视频地址" in message:
-            return TaskFailureInfo(
+            return normalize_task_failure_info(TaskFailureInfo(
                 code="videos.provider.missingVideoUrl",
                 source=source_hint or TASK_ERROR_SOURCE_PROVIDER,
                 detail=message,
                 retryable=True if retryable_hint is None else retryable_hint,
                 message="videos.provider.missingVideoUrl",
-            )
+            ))
         if "视频生成失败" in message:
-            return TaskFailureInfo(
+            return normalize_task_failure_info(TaskFailureInfo(
                 code="videos.provider.failed",
                 source=source_hint or TASK_ERROR_SOURCE_PROVIDER,
                 detail=message,
                 retryable=True if retryable_hint is None else retryable_hint,
                 message="videos.provider.failed",
-            )
+            ))
 
     known_failure = map_known_exception_to_failure(
         error,
@@ -331,18 +388,18 @@ def build_task_failure_info(
         retryable_hint=retryable_hint,
     )
     if known_failure is not None:
-        return known_failure
+        return normalize_task_failure_info(known_failure)
 
     if isinstance(error, ValueError):
         code = fallback_code if fallback_code != "videos.internal.unexpected" else "videos.validation.invalidState"
         source = source_hint or classify_task_error_source(code)
         retryable = retryable_hint if retryable_hint is not None else infer_task_error_retryable(code, source)
-        return TaskFailureInfo(code=code, source=source, detail=str(error), retryable=retryable, message=code)
+        return normalize_task_failure_info(TaskFailureInfo(code=code, source=source, detail=str(error), retryable=retryable, message=code))
 
     code = fallback_code
     source = source_hint or classify_task_error_source(code)
     retryable = retryable_hint if retryable_hint is not None else infer_task_error_retryable(code, source)
-    return TaskFailureInfo(code=code, source=source, detail=str(error), retryable=retryable, message=code)
+    return normalize_task_failure_info(TaskFailureInfo(code=code, source=source, detail=str(error), retryable=retryable, message=code))
 
 
 def validate_service_tier_for_task_type(*, task_type: str, service_tier: str | None) -> str:
@@ -746,6 +803,20 @@ async def set_default_logo(db: AsyncSession, user_id: UUID, logo_id: UUID) -> Us
     return UserLogoOut(id=target.id, key=target.key, name=target.display_name, is_default=target.is_default)
 
 
+async def rename_logo_asset(db: AsyncSession, user_id: UUID, logo_id: UUID, display_name: str) -> UserLogoOut:
+    stmt = select(LogoAsset).where(LogoAsset.user_id == user_id, LogoAsset.id == logo_id)
+    logo = (await db.execute(stmt)).scalar_one_or_none()
+    if logo is None:
+        raise AppError("videos.logo.notFound")
+    normalized_name = display_name.strip()
+    if not normalized_name:
+        raise AppError("videos.logo.invalidName")
+    logo.display_name = normalized_name[:100]
+    await db.flush()
+    await db.refresh(logo)
+    return UserLogoOut(id=logo.id, key=logo.key, name=logo.display_name, is_default=logo.is_default)
+
+
 async def delete_logo_asset(db: AsyncSession, user_id: UUID, logo_id: UUID) -> None:
     stmt = select(LogoAsset).where(LogoAsset.user_id == user_id)
     logos = list((await db.execute(stmt)).scalars().all())
@@ -1053,7 +1124,7 @@ async def create_short_video_task(
 
     prompt = template.prompt.strip()
     planned_quota = 1
-    await check_quota_available(db, user.id, planned_quota)
+    await check_quota_available(db, user.id, planned_quota, task_kind=VIDEO_TASK_TYPE_SHORT)
     logo_position_x, logo_position_y = normalize_logo_overlay_position(
         access_context,
         logo_key=logo_key,
@@ -1167,7 +1238,7 @@ async def create_long_video_task(
         )
 
     quota_amount = len(ordered_image_keys)
-    await check_quota_available(db, user.id, quota_amount)
+    await check_quota_available(db, user.id, quota_amount, task_kind=VIDEO_TASK_TYPE_LONG)
     logo_position_x, logo_position_y = normalize_logo_overlay_position(
         access_context,
         logo_key=logo_key,
@@ -2581,11 +2652,12 @@ async def process_long_video_task(task_id: UUID | str) -> None:
                 provider_details: dict[str, dict[str, str]] = dict(existing_provider_details.get("segments") or {})
                 completed_segments = 0
                 for segment in segments:
+                    segment_id = segment.id
                     if segment.status == LONG_VIDEO_SEGMENT_STATUS_SUCCEEDED and segment.segment_video_key:
                         segment_keys.append(segment.segment_video_key)
                         completed_segments += 1
                         if segment.provider_task_id:
-                            provider_details[str(segment.id)] = {"provider_task_id": segment.provider_task_id}
+                            provider_details[str(segment_id)] = {"provider_task_id": segment.provider_task_id}
                         continue
 
                     if segment.status == LONG_VIDEO_SEGMENT_STATUS_FAILED:
@@ -2641,10 +2713,11 @@ async def process_long_video_task(task_id: UUID | str) -> None:
                         )
                     except Exception as segment_exc:
                         await db.rollback()
+                        # AsyncSession rollback expires ORM state; keep scalar ids captured before rollback.
                         _, cleanup_keys = await fail_long_video_task_due_to_segment_error(
                             db,
                             task_id=task_id,
-                            segment_id=segment.id,
+                            segment_id=segment_id,
                             error=segment_exc,
                             segment_count=len(segments),
                             completed_segments=completed_segments,
@@ -2663,7 +2736,7 @@ async def process_long_video_task(task_id: UUID | str) -> None:
                     segment.finished_at = datetime.now(timezone.utc)
                     segment_keys.append(output_key)
                     completed_segments += 1
-                    provider_details[str(segment.id)] = generated.provider_task_ids
+                    provider_details[str(segment_id)] = generated.provider_task_ids
                     task.provider_name = generated.provider_name
                     task.provider_task_ids = {
                         "segment_count": len(segments),

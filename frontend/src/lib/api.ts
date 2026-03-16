@@ -15,13 +15,23 @@ export class UnauthorizedError extends Error {
 export class ApiError extends Error {
   code?: string;
   rawDetail?: string | Record<string, unknown> | null;
+  detail?: Record<string, unknown> | null;
   status?: number;
 
-  constructor(message: string, options?: { code?: string; rawDetail?: string | Record<string, unknown> | null; status?: number }) {
+  constructor(
+    message: string,
+    options?: {
+      code?: string;
+      rawDetail?: string | Record<string, unknown> | null;
+      detail?: Record<string, unknown> | null;
+      status?: number;
+    },
+  ) {
     super(message);
     this.name = "ApiError";
     this.code = options?.code;
     this.rawDetail = options?.rawDetail;
+    this.detail = options?.detail;
     this.status = options?.status;
   }
 }
@@ -166,6 +176,8 @@ export type QuotaSnapshot = {
   subscription_is_local_trial: boolean;
   subscription_is_billing_managed: boolean;
   subscription_cancel_at_period_end: boolean;
+  trial_expires_at: string | null;
+  subscription_current_period_start: string | null;
   subscription_current_period_end: string | null;
   subscription_remaining: number;
   package_remaining: number;
@@ -173,6 +185,8 @@ export type QuotaSnapshot = {
   signup_bonus_remaining: number;
   invite_bonus_remaining: number;
   total_available: number;
+  pending_reserved: number;
+  schedulable_available: number;
   access_tier: "signup_bonus" | "basic" | "pro" | "ultimate" | "none";
   capabilities: string[];
   can_purchase_quota_package: boolean;
@@ -376,12 +390,15 @@ export type VideoTask = {
 
 async function parseError(res: Response) {
   const e = await res.json().catch(() => ({}));
-  const detail = (e as { detail?: string | { code?: string; message?: string } }).detail;
+  const detail = (e as { detail?: string | Record<string, unknown> }).detail;
   if (detail && typeof detail === "object" && detail.code) {
-    const translated = translateApiError(detail.code, getStoredLocale());
-    throw new ApiError(translated ?? detail.message ?? t(getStoredLocale(), "common.requestFailed"), {
-      code: detail.code,
-      rawDetail: detail.message ?? detail,
+    const code = typeof detail.code === "string" ? detail.code : undefined;
+    const message = typeof detail.message === "string" ? detail.message : undefined;
+    const translated = code ? translateApiError(code, getStoredLocale()) : undefined;
+    throw new ApiError(translated ?? message ?? t(getStoredLocale(), "common.requestFailed"), {
+      code,
+      rawDetail: message ?? detail,
+      detail,
       status: res.status,
     });
   }
@@ -727,14 +744,21 @@ export async function getChargeReconciliation(accessToken: string, options?: { l
   return res.json() as Promise<ChargeReconciliation>;
 }
 
-export async function createSubscriptionCheckout(accessToken: string, planId: string) {
+export async function createSubscriptionCheckout(
+  accessToken: string,
+  planId: string,
+  effectiveStrategy?: "immediate" | "deferred",
+) {
   const res = await authFetch(`${PREFIX}/billing/checkout/subscription`, {
     method: "POST",
     headers: {
       ...authHeaders(accessToken),
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ plan_id: planId }),
+    body: JSON.stringify({
+      plan_id: planId,
+      ...(effectiveStrategy ? { effective_strategy: effectiveStrategy } : {}),
+    }),
   });
   if (!res.ok) await parseError(res);
   return res.json() as Promise<CheckoutSessionResult>;
@@ -764,6 +788,7 @@ export async function createCustomerPortal(accessToken: string) {
 
 export type UpgradeSubscriptionResult = {
   result_status: "redirect_to_stripe" | "applied_now" | "payment_failed";
+  effective_strategy?: "immediate" | "deferred" | null;
   invoice_hosted_url?: string | null;
   message?: string | null;
   plan_type?: string | null;
@@ -781,29 +806,38 @@ export type UpgradeSubscriptionPreviewResult = {
   amount_due_cents: number;
   currency: string;
   current_period_end?: string | null;
+  effective_strategy?: "immediate" | "deferred" | null;
 };
 
-export async function upgradeSubscription(accessToken: string, planId: string) {
+export async function upgradeSubscription(
+  accessToken: string,
+  planId: string,
+  effectiveStrategy: "immediate" | "deferred" = "immediate",
+) {
   const res = await authFetch(`${PREFIX}/billing/subscription/upgrade`, {
     method: "POST",
     headers: {
       ...authHeaders(accessToken),
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ plan_id: planId }),
+    body: JSON.stringify({ plan_id: planId, effective_strategy: effectiveStrategy }),
   });
   if (!res.ok) await parseError(res);
   return res.json() as Promise<UpgradeSubscriptionResult>;
 }
 
-export async function previewUpgradeSubscription(accessToken: string, planId: string) {
+export async function previewUpgradeSubscription(
+  accessToken: string,
+  planId: string,
+  effectiveStrategy: "immediate" | "deferred" = "immediate",
+) {
   const res = await authFetch(`${PREFIX}/billing/subscription/upgrade/preview`, {
     method: "POST",
     headers: {
       ...authHeaders(accessToken),
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ plan_id: planId }),
+    body: JSON.stringify({ plan_id: planId, effective_strategy: effectiveStrategy }),
   });
   if (!res.ok) await parseError(res);
   return res.json() as Promise<UpgradeSubscriptionPreviewResult>;
@@ -900,6 +934,19 @@ export async function setDefaultLogo(accessToken: string, logoId: string) {
   const res = await authFetch(`${PREFIX}/videos/logos/${logoId}/default`, {
     method: "POST",
     headers: authHeaders(accessToken),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<UserLogo>;
+}
+
+export async function updateLogoName(accessToken: string, logoId: string, name: string) {
+  const res = await authFetch(`${PREFIX}/videos/logos/${logoId}`, {
+    method: "PATCH",
+    headers: {
+      ...authHeaders(accessToken),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name }),
   });
   if (!res.ok) await parseError(res);
   return res.json() as Promise<UserLogo>;

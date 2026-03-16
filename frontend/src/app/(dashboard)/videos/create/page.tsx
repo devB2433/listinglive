@@ -32,6 +32,7 @@ import {
   type PendingVideoDraftStatus,
   type StoredPendingVideoDraft,
 } from "@/lib/pending-video-task";
+import { getQuotaSubmissionState } from "@/lib/quota-flow";
 import {
   getCachedProfileCards,
   getCachedSceneTemplates,
@@ -119,6 +120,8 @@ export default function VideoCreatePage() {
   const supportsAvatarOverlay = hasCapability(quota, "avatar_overlay");
   const supportsEndingProfileCard = hasCapability(quota, "ending_profile_card");
   const effectiveDuration = durationEditable ? durationSeconds : fixedDuration || durationSeconds;
+  const quotaSubmissionState = getQuotaSubmissionState(1, quota.schedulable_available);
+  const { requiredQuota, availableQuota, canSubmit: canSubmitWithQuota } = quotaSubmissionState;
   const selectedLogo = logos.find((logo) => logo.key === selectedLogoKey) || null;
   const selectedAvatar = avatars.find((avatar) => avatar.key === selectedAvatarKey) || null;
   const canEditLogoPlacement = enableLogo && !!selectedLogo && supportsLogoPositionCustomize;
@@ -856,6 +859,19 @@ export default function VideoCreatePage() {
     }
   }
 
+  async function handleOpenBillingForQuota() {
+    const draft = await persistCurrentDraft("editing");
+    const params = new URLSearchParams({
+      returnTo: "/videos/create",
+      resumeMode: "edit",
+      taskType: "short",
+    });
+    if (draft?.id) {
+      params.set("draft", draft.id);
+    }
+    router.push(`/billing?${params.toString()}`);
+  }
+
   async function handleCancelCurrentTask() {
     submitAbortControllerRef.current?.abort();
     suspendDraftAutosaveRef.current = false;
@@ -1561,6 +1577,41 @@ export default function VideoCreatePage() {
 
           {formMessage && <p className="text-sm text-green-600">{formMessage}</p>}
           {formError && <p className="text-sm text-red-600">{formError}</p>}
+          {step === 3 && !canSubmitWithQuota && (
+            <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              <p className="font-medium">{translate("dashboard.billing.quotaInsufficientTitle")}</p>
+              <p className="mt-1">
+                {translate("dashboard.billing.quotaInsufficientSummary", {
+                  required: requiredQuota,
+                  available: availableQuota,
+                })}
+              </p>
+              {quota.pending_reserved > 0 ? (
+                <p className="mt-1 text-amber-800">
+                  {translate("dashboard.billing.quotaPendingReservedHint", { count: quota.pending_reserved })}
+                </p>
+              ) : null}
+              <p className="mt-1 text-amber-800">
+                {availableQuota > 0
+                  ? translate("dashboard.billing.quotaRemainingOptions", { count: availableQuota })
+                  : translate("dashboard.billing.quotaRemainingOptionsZero")}
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {quota.can_purchase_quota_package ? (
+                  <button
+                    type="button"
+                    onClick={() => void handleOpenBillingForQuota()}
+                    className="rounded-md bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700"
+                  >
+                    {translate("dashboard.billing.buyQuotaPackageAndReturn")}
+                  </button>
+                ) : null}
+                <Link href="/billing" className="rounded-md border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100">
+                  {translate("dashboard.nav.billing")}
+                </Link>
+              </div>
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center gap-3">
             {step > 1 && (
@@ -1586,12 +1637,12 @@ export default function VideoCreatePage() {
                 key="wizard-submit"
                 type="button"
                 onClick={() => void submitTask()}
-                disabled={creating || quota.total_available <= 0}
+                disabled={creating || !canSubmitWithQuota}
                 className="rounded-md bg-blue-600 px-4 py-2 text-white hover:bg-blue-700 disabled:opacity-50"
               >
                 {creating
                   ? translate("dashboard.shortVideo.creating")
-                  : quota.total_available > 0
+                  : canSubmitWithQuota
                     ? translate("dashboard.shortVideo.create")
                     : translate("dashboard.shortVideo.noQuota")}
               </button>

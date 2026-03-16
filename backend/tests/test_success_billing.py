@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
-from backend.services.quota_service import check_quota_available, get_task_charge_reconciliation
+from backend.services.quota_service import QuotaInsufficientError, check_quota_available, get_task_charge_reconciliation
 from backend.services.video_service import settle_task_quota_charge
 
 
@@ -37,8 +37,11 @@ class SuccessBillingTests(unittest.IsolatedAsyncioTestCase):
         ):
             available = await check_quota_available(db, uuid4(), 6)
             self.assertEqual(available, 6)
-            with self.assertRaisesRegex(ValueError, "可用配额不足"):
+            with self.assertRaises(QuotaInsufficientError) as ctx:
                 await check_quota_available(db, uuid4(), 7)
+            self.assertEqual(ctx.exception.required_quota, 7)
+            self.assertEqual(ctx.exception.available_quota, 6)
+            self.assertEqual(ctx.exception.pending_reserved, 4)
 
     async def test_settle_task_quota_charge_is_idempotent(self) -> None:
         now = datetime.now(timezone.utc)

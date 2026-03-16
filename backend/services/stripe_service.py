@@ -17,6 +17,7 @@ PORTAL_CONFIGURATION_METADATA = {
     "managed_by": "listinglive",
     "purpose": "subscription_upgrade",
 }
+ACTIVE_STRIPE_SUBSCRIPTION_STATUSES = {"active", "trialing", "past_due"}
 
 
 def _get_stripe_client() -> stripe:
@@ -82,8 +83,9 @@ def _build_managed_portal_configuration_params() -> dict[str, Any]:
             "subscription_update": {
                 "enabled": True,
                 "default_allowed_updates": ["price"],
-                "proration_behavior": "always_invoice",
-                "billing_cycle_anchor": "unchanged",
+                # Upgrades take effect immediately and start a new billing cycle from now.
+                "proration_behavior": "none",
+                "billing_cycle_anchor": "now",
                 "products": [
                     {"product": product_id, "prices": sorted(price_ids)}
                     for product_id, price_ids in sorted(products.items())
@@ -117,8 +119,27 @@ def ensure_billing_portal_configuration() -> str:
     return str(created["id"])
 
 
-def create_subscription_checkout_session(*, customer_id: str, price_id: str, user_id: str, plan_id: str, plan_type: str) -> str:
+def create_subscription_checkout_session(
+    *,
+    customer_id: str,
+    price_id: str,
+    user_id: str,
+    plan_id: str,
+    plan_type: str,
+    effective_strategy: str = "immediate",
+    trial_end_at: datetime | None = None,
+) -> str:
     client = _get_stripe_client()
+    subscription_metadata = {
+        "user_id": user_id,
+        "plan_id": plan_id,
+        "plan_type": plan_type,
+        "effective_strategy": effective_strategy,
+    }
+    subscription_data: dict[str, Any] = {"metadata": subscription_metadata}
+    if trial_end_at is not None:
+        subscription_data["trial_end"] = int(trial_end_at.timestamp())
+
     session = client.checkout.Session.create(
         mode="subscription",
         customer=customer_id,
@@ -132,14 +153,9 @@ def create_subscription_checkout_session(*, customer_id: str, price_id: str, use
             "user_id": user_id,
             "plan_id": plan_id,
             "plan_type": plan_type,
+            "effective_strategy": effective_strategy,
         },
-        subscription_data={
-            "metadata": {
-                "user_id": user_id,
-                "plan_id": plan_id,
-                "plan_type": plan_type,
-            }
-        },
+        subscription_data=subscription_data,
     )
     return str(session["url"])
 
@@ -238,6 +254,21 @@ def construct_webhook_event(payload: bytes, signature: str | None) -> Any:
 def retrieve_subscription(subscription_id: str) -> Any:
     client = _get_stripe_client()
     return client.Subscription.retrieve(subscription_id)
+
+
+def list_active_customer_subscriptions(customer_id: str) -> list[Any]:
+    client = _get_stripe_client()
+    subscriptions = client.Subscription.list(customer=customer_id, status="all", limit=100)
+    data = subscriptions.get("data", []) if isinstance(subscriptions, dict) else getattr(subscriptions, "data", [])
+    active: list[Any] = []
+    for subscription in data:
+        if isinstance(subscription, dict):
+            status = str(subscription.get("status") or "")
+        else:
+            status = str(getattr(subscription, "status", "") or "")
+        if status in ACTIVE_STRIPE_SUBSCRIPTION_STATUSES:
+            active.append(subscription)
+    return active
 
 
 def preview_subscription_price_change(*, customer_id: str, subscription_id: str, new_price_id: str) -> Any:

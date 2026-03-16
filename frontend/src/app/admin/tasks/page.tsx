@@ -112,6 +112,7 @@ export default function AdminTasksPage() {
             <tbody>
               {(data?.items ?? []).map((task) => {
                 const translatedError = task.error_code ? translateApiError(task.error_code, locale) ?? task.error_code : null;
+                const operationalError = task.error_message ?? translatedError ?? "-";
                 const isExpanded = expandedTaskId === task.id;
                 return (
                   <Fragment key={task.id}>
@@ -131,7 +132,7 @@ export default function AdminTasksPage() {
                       </td>
                       <td className="px-3 py-2 text-gray-700">{formatDate(task.created_at)}</td>
                       <td className="px-3 py-2 text-gray-700">{task.processing_seconds ?? task.queue_wait_seconds ?? 0}s</td>
-                      <td className="px-3 py-2 text-gray-700">{translatedError ?? task.error_message ?? "-"}</td>
+                      <td className="px-3 py-2 text-gray-700">{operationalError}</td>
                       <td className="px-3 py-2">
                         <button
                           type="button"

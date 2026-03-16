@@ -4,7 +4,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
-from backend.services.video_service import retry_long_video_task
+from sqlalchemy.exc import MissingGreenlet
+
+from backend.services.video_service import process_long_video_task, retry_long_video_task
 
 
 class _FakeScalarResult:
@@ -21,6 +23,48 @@ class _FakeExecuteResult:
 
     def scalars(self):
         return _FakeScalarResult(self._items)
+
+
+class _FakeAsyncSessionContext:
+    def __init__(self, db):
+        self._db = db
+
+    async def __aenter__(self):
+        return self._db
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeLockContext:
+    async def __aenter__(self):
+        return True
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _RollbackSensitiveSegment:
+    def __init__(self, segment_id, *, status="queued", image_key="segment-image.jpg", duration_seconds=5):
+        self._segment_id = segment_id
+        self._invalid_after_rollback = False
+        self.status = status
+        self.image_key = image_key
+        self.duration_seconds = duration_seconds
+        self.provider_task_id = None
+        self.segment_video_key = None
+        self.processing_started_at = None
+        self.finished_at = None
+        self.scene_template_id = None
+
+    @property
+    def id(self):
+        if self._invalid_after_rollback:
+            raise MissingGreenlet("greenlet_spawn has not been called")
+        return self._segment_id
+
+    def invalidate_after_rollback(self):
+        self._invalid_after_rollback = True
 
 
 class LongTaskRetryTests(unittest.IsolatedAsyncioTestCase):
@@ -154,6 +198,53 @@ class LongTaskRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task.charged_quota_consumed, 0)
         self.assertIsNone(task.charged_at)
         db.flush.assert_awaited_once()
+
+    async def test_process_long_task_uses_captured_segment_id_after_rollback(self) -> None:
+        task = SimpleNamespace(
+            id=uuid4(),
+            task_type="long",
+            status="processing",
+            provider_task_ids={},
+            scene_template_id=uuid4(),
+            resolution="720p",
+            aspect_ratio="9:16",
+        )
+        first_segment = _RollbackSensitiveSegment(uuid4())
+        second_segment = _RollbackSensitiveSegment(uuid4())
+
+        db = SimpleNamespace(
+            get=AsyncMock(return_value=task),
+            execute=AsyncMock(return_value=_FakeExecuteResult([first_segment, second_segment])),
+            commit=AsyncMock(),
+            rollback=AsyncMock(side_effect=lambda: first_segment.invalidate_after_rollback()),
+        )
+
+        fail_long_video_task_due_to_segment_error = AsyncMock(return_value=(task, []))
+
+        with (
+            patch("backend.services.video_service.AsyncSessionLocal", return_value=_FakeAsyncSessionContext(db)),
+            patch("backend.services.video_service.hold_task_execution_lock", return_value=_FakeLockContext()),
+            patch("backend.services.video_service.wait_for_task_execution_turn", AsyncMock(return_value=task)),
+            patch(
+                "backend.services.video_service.get_enabled_scene_template_by_category",
+                AsyncMock(return_value=SimpleNamespace(prompt="segment prompt")),
+            ),
+            patch(
+                "backend.services.video_service.generate_long_segment_output",
+                AsyncMock(side_effect=RuntimeError("segment exploded")),
+            ),
+            patch(
+                "backend.services.video_service.fail_long_video_task_due_to_segment_error",
+                fail_long_video_task_due_to_segment_error,
+            ),
+            patch("backend.services.video_service.cleanup_storage_keys_best_effort", AsyncMock()),
+            patch("backend.services.video_service.heartbeat_long_segment", AsyncMock()),
+            patch("backend.services.video_service.heartbeat_active_video_task", AsyncMock()),
+        ):
+            await process_long_video_task(task.id)
+
+        fail_long_video_task_due_to_segment_error.assert_awaited_once()
+        self.assertEqual(fail_long_video_task_due_to_segment_error.await_args.kwargs["segment_id"], first_segment._segment_id)
 
 
 if __name__ == "__main__":

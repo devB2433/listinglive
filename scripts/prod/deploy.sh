@@ -36,6 +36,19 @@ ensure_commands docker git curl
 require_env_values APP_GIT_BRANCH PROXY_PORT
 ensure_prod_dirs
 
+mapfile -t COMPOSE_SERVICES < <(compose config --services)
+
+has_service() {
+  local target="$1"
+  local svc
+  for svc in "${COMPOSE_SERVICES[@]}"; do
+    if [[ "${svc}" == "${target}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 log "Using container timezone: ${CONTAINER_TIMEZONE}"
 
 PREVIOUS_REF="$(current_git_ref)"
@@ -69,8 +82,27 @@ if [[ ! -d "${ROOT_DIR}/content/media" ]]; then
   log "Created empty content/media directories. Replace with real assets if needed."
 fi
 
+build_services=(frontend api beat)
+app_services=(api beat frontend reverse-proxy)
+
+if has_service worker-io; then
+  build_services+=(worker-io)
+  app_services+=(worker-io)
+fi
+if has_service worker-cpu; then
+  build_services+=(worker-cpu)
+  app_services+=(worker-cpu)
+fi
+if has_service worker; then
+  build_services+=(worker)
+  app_services+=(worker)
+fi
+if ! has_service worker && ! has_service worker-io && ! has_service worker-cpu; then
+  fail "No worker service found in compose file (expected worker or worker-io/worker-cpu)."
+fi
+
 log "Building production images"
-compose build frontend api worker-io worker-cpu beat
+compose build "${build_services[@]}"
 
 log "Starting database and redis"
 compose up -d postgres redis
@@ -81,7 +113,7 @@ log "Running database migrations"
 compose run --rm api alembic upgrade head
 
 log "Starting application services"
-compose up -d api worker-io worker-cpu beat frontend reverse-proxy
+compose up -d --remove-orphans "${app_services[@]}"
 
 wait_for_service api 60 2
 wait_for_service frontend 60 2

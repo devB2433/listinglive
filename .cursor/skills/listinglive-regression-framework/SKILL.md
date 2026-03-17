@@ -56,3 +56,25 @@ Then debug using those files first.
 - Result: pass/fail
 - Report paths
 - If fail: top 1-3 failing tests + suggested rerun command
+
+## Production Safety Addendum (2026-03)
+
+For release-critical changes that involve visual rendering (profile cards, text overlay, image composition), regression pass alone is not enough. Add the following checks before pushing production deployment guidance:
+
+1. **Container Environment Parity**
+   - Verify rendering dependencies in runtime image (fonts/codecs/libs), not only local dev machine.
+   - For Linux runtime, avoid relying on Windows-only fonts (`arial.ttf`, `Segoe Script.ttf`, etc.).
+
+2. **Render Path Verification In-Container**
+   - Run/preview at least one real render path in containerized environment (e.g., profile card preview endpoint).
+   - Confirm no fallback to tiny default font (`ImageFont.load_default`) in final output.
+
+3. **Release Gate for Rendering Changes**
+   - Treat render/font dependency checks as release gate item alongside `full` regression.
+   - If render stack changed, explicitly report: image dependencies, verification command, and visual sanity result.
+
+4. **Mandatory Postmortem Capture**
+   - When a prod issue is caused by env mismatch (e.g., missing fonts), update this skill with:
+     - root cause,
+     - missed guardrail,
+     - permanent checklist item.

@@ -780,6 +780,8 @@ def apply_avatar_to_video_file(
 
 def _load_font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
     candidates = [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
         "arialbd.ttf" if bold else "arial.ttf",
     ]
@@ -793,6 +795,8 @@ def _load_font(size: int, *, bold: bool = False) -> ImageFont.ImageFont:
 
 def _load_accent_font(size: int) -> ImageFont.ImageFont:
     candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Italic.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
         "Segoe Script.ttf",
         "segoesc.ttf",
         "Brush Script MT Italic.ttf",

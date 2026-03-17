@@ -1,13 +1,24 @@
 param(
   [int]$BackendPort = 8003,
   [int]$FrontendPort = 3001,
-  [int]$WorkerCount = 8
+  [int]$WorkerCount = 8,
+  [switch]$UseDockerApp,
+  [string]$DockerEnvFile = ".env.prod.test",
+  [string]$DockerComposeFile = "docker-compose.prod.yml",
+  [switch]$DockerBuild
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 Set-Location $root
 $runtimeDir = Join-Path $root '.runtime'
+$dockerComposeFiles = @($DockerComposeFile)
+if ($UseDockerApp) {
+  $localOverride = Join-Path $root 'docker-compose.prod.local.yml'
+  if (Test-Path $localOverride) {
+    $dockerComposeFiles += $localOverride
+  }
+}
 
 # ---------------------------------------------------------------------------
 # Helper functions
@@ -113,6 +124,40 @@ function Save-Pid([System.Diagnostics.Process]$Proc, [string]$Name) {
   }
 }
 
+function Run-DockerCompose([string[]]$ComposeArgs) {
+  $prefix = @('--env-file', $DockerEnvFile)
+  foreach ($composeFile in $dockerComposeFiles) {
+    $prefix += @('-f', $composeFile)
+  }
+  & docker compose @prefix @ComposeArgs
+}
+
+function Ensure-DockerAppConfig {
+  $configRoot = Join-Path $root ".tmp/prod-test/config"
+  New-Item -ItemType Directory -Force $configRoot | Out-Null
+  $aiProviderToml = Join-Path $configRoot "ai_provider.toml"
+  if (-not (Test-Path $aiProviderToml)) {
+    @'
+[video]
+provider = "local"
+'@ | Set-Content $aiProviderToml -NoNewline
+    Write-Host "Created $aiProviderToml with local provider."
+  }
+}
+
+function Wait-DockerServiceReady([string]$Service, [string[]]$CheckArgs, [int]$TimeoutSeconds = 120) {
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    try {
+      $composeExecArgs = @('exec', '-T', $Service) + $CheckArgs
+      Run-DockerCompose $composeExecArgs 2>$null | Out-Null
+      if ($LASTEXITCODE -eq 0) { return }
+    } catch {}
+    Start-Sleep -Milliseconds 1000
+  }
+  throw "Timed out waiting for docker service '$Service' to become ready."
+}
+
 # === Phase 1: Kill previous processes (PID files first, then fallback) ===
 if (Test-Path $runtimeDir) {
   Get-ChildItem $runtimeDir -Filter '*.pid' | ForEach-Object { Kill-ByPidFile $_.FullName }
@@ -141,16 +186,38 @@ if (Test-Path $frontendBuildDir) {
   Remove-Item $frontendBuildDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+if ($UseDockerApp) {
+  if (-not (Test-Path $DockerEnvFile)) {
+    throw "Docker env file not found: $DockerEnvFile"
+  }
+  if (-not (Test-Path $DockerComposeFile)) {
+    throw "Docker compose file not found: $DockerComposeFile"
+  }
+  Ensure-DockerAppConfig
+}
+
 # === Phase 4: Infrastructure ===
 $env:CONTAINER_TIMEZONE = Get-ContainerTimeZone
-docker-compose up -d postgres redis | Out-Null
+if ($UseDockerApp) {
+  if ($DockerBuild) {
+    Write-Host "Building app images (frontend/api/worker/beat)..."
+    Run-DockerCompose @('build', 'frontend', 'api', 'worker', 'beat')
+  }
+  Run-DockerCompose @('up', '-d', 'postgres', 'redis') | Out-Null
+} else {
+  docker-compose up -d postgres redis | Out-Null
+}
 
 # === Phase 4.5: Wait for Postgres and run migrations ===
 $pgReady = $false
 $pgDeadline = (Get-Date).AddSeconds(30)
 while ((Get-Date) -lt $pgDeadline) {
   try {
-    docker-compose exec -T postgres pg_isready -U listinglive 2>$null | Out-Null
+    if ($UseDockerApp) {
+      Run-DockerCompose @('exec', '-T', 'postgres', 'pg_isready', '-U', 'listinglive') 2>$null | Out-Null
+    } else {
+      docker-compose exec -T postgres pg_isready -U listinglive 2>$null | Out-Null
+    }
     if ($LASTEXITCODE -eq 0) { $pgReady = $true; break }
   } catch {}
   Start-Sleep -Milliseconds 800
@@ -160,9 +227,24 @@ if (-not $pgReady) {
 }
 $env:PYTHONPATH = $root
 Write-Host "Running database migrations (alembic upgrade head)..."
-& python -m alembic upgrade head
+if ($UseDockerApp) {
+  Run-DockerCompose @('run', '--rm', 'api', 'alembic', 'upgrade', 'head')
+} else {
+  & python -m alembic upgrade head
+}
 if ($LASTEXITCODE -ne 0) {
   Write-Error "Database migration failed. Fix errors and re-run the script."
+}
+
+if ($UseDockerApp) {
+  Write-Host "Starting full container app stack..."
+  Run-DockerCompose @('up', '-d', 'api', 'worker', 'beat', 'frontend', 'reverse-proxy') | Out-Null
+  Wait-DockerServiceReady -Service 'api' -CheckArgs @('python', '-c', "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)")
+  Wait-DockerServiceReady -Service 'frontend' -CheckArgs @('node', '-e', "fetch('http://127.0.0.1:3000').then((r)=>process.exit(r.ok ? 0 : 1)).catch(()=>process.exit(1))")
+  Write-Host "Mode: full container"
+  Write-Host "Frontend (via reverse proxy): http://localhost:$FrontendPort"
+  Write-Host "Use this for regression/production-parity checks."
+  return
 }
 
 # === Phase 5: Reset log files ===

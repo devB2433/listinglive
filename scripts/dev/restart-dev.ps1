@@ -200,8 +200,8 @@ if ($UseDockerApp) {
 $env:CONTAINER_TIMEZONE = Get-ContainerTimeZone
 if ($UseDockerApp) {
   if ($DockerBuild) {
-    Write-Host "Building app images (frontend/api/worker/beat)..."
-    Run-DockerCompose @('build', 'frontend', 'api', 'worker', 'beat')
+    Write-Host "Building app images (frontend/api/worker-io/worker-cpu/beat)..."
+    Run-DockerCompose @('build', 'frontend', 'api', 'worker-io', 'worker-cpu', 'beat')
   }
   Run-DockerCompose @('up', '-d', 'postgres', 'redis') | Out-Null
 } else {
@@ -238,7 +238,7 @@ if ($LASTEXITCODE -ne 0) {
 
 if ($UseDockerApp) {
   Write-Host "Starting full container app stack..."
-  Run-DockerCompose @('up', '-d', 'api', 'worker', 'beat', 'frontend', 'reverse-proxy') | Out-Null
+  Run-DockerCompose @('up', '-d', 'api', 'worker-io', 'worker-cpu', 'beat', 'frontend', 'reverse-proxy') | Out-Null
   Wait-DockerServiceReady -Service 'api' -CheckArgs @('python', '-c', "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)")
   Wait-DockerServiceReady -Service 'frontend' -CheckArgs @('node', '-e', "fetch('http://127.0.0.1:3000').then((r)=>process.exit(r.ok ? 0 : 1)).catch(()=>process.exit(1))")
   Write-Host "Mode: full container"
@@ -273,7 +273,7 @@ for ($i = 1; $i -le $WorkerCount; $i++) {
   $wOut = if ($i -eq 1) { Join-Path $runtimeDir 'worker.out.log' } else { Join-Path $runtimeDir "worker-$i.out.log" }
   $wErr = if ($i -eq 1) { Join-Path $runtimeDir 'worker.err.log' } else { Join-Path $runtimeDir "worker-$i.err.log" }
   $wName = if ($i -eq 1) { 'worker' } else { "worker-$i" }
-  $wProc = Start-Process python -ArgumentList '-m','celery','-A','backend.tasks.celery_app','worker','-l','info','-P','solo','-Q','celery,video-standard,video-flex','-n',"listinglive-worker-$i@%h" -WorkingDirectory $root -RedirectStandardOutput $wOut -RedirectStandardError $wErr -PassThru
+  $wProc = Start-Process python -ArgumentList '-m','celery','-A','backend.tasks.celery_app','worker','-l','info','-P','solo','-Q','celery,video-io,video-cpu,video-standard,video-flex','-n',"listinglive-worker-$i@%h" -WorkingDirectory $root -RedirectStandardOutput $wOut -RedirectStandardError $wErr -PassThru
   Save-Pid $wProc $wName
 }
 

@@ -8,7 +8,9 @@ from typing import Any
 
 from backend.services.video_service import (
     cleanup_expired_video_files,
+    finalize_long_video_task_cpu,
     finalize_flex_short_video_task,
+    finalize_standard_short_video_task,
     poll_flex_short_video_tasks,
     process_long_video_task,
     process_short_video_task,
@@ -67,6 +69,16 @@ def poll_flex_tasks_job() -> None:
 @celery_app.task(name="video.finalize_flex_short_video_task")
 def finalize_flex_short_video_task_job(task_id: str) -> None:
     _run_in_worker_event_loop(finalize_flex_short_video_task(task_id))
+
+
+@celery_app.task(name="video.finalize_standard_short_video_task")
+def finalize_standard_short_video_task_job(task_id: str) -> None:
+    _run_in_worker_event_loop(finalize_standard_short_video_task(task_id))
+
+
+@celery_app.task(name="video.finalize_long_video_task_cpu")
+def finalize_long_video_task_cpu_job(task_id: str) -> None:
+    _run_in_worker_event_loop(finalize_long_video_task_cpu(task_id))
 
 
 @celery_app.task(name="video.reconcile_stale_video_tasks")

@@ -4,7 +4,7 @@
 
 ## 1. 这套部署方案能提供什么
 
-- 前端、后端、worker、beat、数据库、Redis 的单机生产部署
+- 前端、后端、worker-io、worker-cpu、beat、数据库、Redis 的单机生产部署
 - 一键部署与一键更新
 - 上传文件与生成视频的共享持久化存储
 - 自动备份与回滚工具
@@ -54,9 +54,12 @@ flowchart TD
     backend --> postgres[(Postgres)]
     backend --> redis[(Redis)]
     backend --> storage[(SharedStorage)]
-    worker[CeleryWorker] --> redis
-    worker --> postgres
-    worker --> storage
+    workerIo[CeleryWorkerIO] --> redis
+    workerIo --> postgres
+    workerIo --> storage
+    workerCpu[CeleryWorkerCPU] --> redis
+    workerCpu --> postgres
+    workerCpu --> storage
     beat[CeleryBeat] --> redis
     beat --> postgres
     backup[BackupJob] --> postgres
@@ -154,6 +157,9 @@ sudo ./scripts/prod/init-host.sh
 - `SMTP_USERNAME`
 - `SMTP_PASSWORD`
 - `VIDEO_PROVIDER_CONCURRENCY_LIMIT`
+- `VIDEO_LONG_MERGE_CONCURRENCY_LIMIT`
+- `WORKER_CPU_CONCURRENCY`
+- `WORKER_IO_CONCURRENCY`
 - `CONTAINER_TIMEZONE_OVERRIDE`（只有你想手动覆盖宿主机时区时才填写）
 
 如果你当前已经确定正式主域名是 `listinglive.ca`，那么下面这些值可以先直接按这个口径填写：
@@ -184,7 +190,8 @@ SMTP_USERNAME=hello@listinglive.ca
 - `postgres`
 - `redis`
 - `api`
-- `worker`
+- `worker-io`
+- `worker-cpu`
 - `beat`
 
 同时会把宿主机的 `/etc/localtime` 只读挂载进生产容器，尽量确保容器内时间显示、日志时间和宿主机一致。
@@ -198,19 +205,25 @@ CONTAINER_TIMEZONE_OVERRIDE=America/Toronto
 
 ### 6.1.1 第三方并发限制建议
 
-如果你的上游视频生成服务明确给出的并发上限是 **10**，建议本地队列门不要直接也设成 `10`，而是先从：
+如果你当前是单机部署，建议先使用“保命值”：
 
 ```dotenv
-VIDEO_PROVIDER_CONCURRENCY_LIMIT=8
+VIDEO_PROVIDER_CONCURRENCY_LIMIT=1
+VIDEO_LONG_MERGE_CONCURRENCY_LIMIT=1
 ```
 
-开始。
+在队列分层后，建议 worker 并发策略为：
+
+```dotenv
+WORKER_CPU_CONCURRENCY=1
+WORKER_IO_CONCURRENCY=10
+```
 
 原因：
 
-- 给第三方偶发抖动、超时重试、恢复中的任务留余量
-- 避免在 Redis 刚恢复、worker 重启、短时间批量提交时直接把上游打满
-- 用户优先看到 ListingLive 自己的本地排队，而不是全部挤进上游黑盒排队
+- 单任务本地后处理已可打满 CPU，先确保“可排队但不打崩”
+- 限制长视频 merge 并发可避免 ffmpeg 峰值叠加
+- 先稳定后再逐步调高并发，风险更可控
 
 当前代码已经改成：**Redis 队列门不可用时，不再放行任务继续请求第三方**，而是直接失败并提示稍后重试。这样可以避免限流保护失效时把第三方并发冲爆。
 
@@ -430,7 +443,7 @@ LISTINGLIVE_ENV_FILE=/opt/listinglive/config/.env.prod ./scripts/prod/deploy.sh
 4. 构建生产镜像
 5. 启动 `postgres` 和 `redis`
 6. 执行 `alembic upgrade head`
-7. 启动 `api`、`worker`、`beat`、`frontend`、`reverse-proxy`
+7. 启动 `api`、`worker-io`、`worker-cpu`、`beat`、`frontend`、`reverse-proxy`
 8. 执行健康检查
 9. 写入部署状态，供回滚使用
 
@@ -623,5 +636,5 @@ SMTP 邮件发送已经接入后端。
 ## 15. 说明
 
 - 生产部署脚本要求 Git 工作区保持干净
-- 共享存储卷必须同时挂给 `api`、`worker`、`beat`
+- 共享存储卷必须同时挂给 `api`、`worker-io`、`worker-cpu`、`beat`
 - 不要把真实生产密钥写入仓库

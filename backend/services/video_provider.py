@@ -714,19 +714,12 @@ def apply_logo_to_video_file(
     position_x: float | None = None,
     position_y: float | None = None,
 ) -> None:
-    temp_output_path = video_path.with_name(f"{video_path.stem}.logo{video_path.suffix}")
-    reader = imageio.get_reader(video_path, format="FFMPEG")
-    meta = reader.get_meta_data()
-    fps = meta.get("fps") or settings.VIDEO_FPS
-    try:
-        with imageio.get_writer(temp_output_path, fps=fps, codec="libx264", format="FFMPEG") as writer:
-            for frame in reader:
-                image = Image.fromarray(frame).convert("RGBA")
-                watermarked = apply_logo_to_frame(image, logo_path, position_x, position_y)
-                writer.append_data(np.asarray(watermarked.convert("RGB")))
-    finally:
-        reader.close()
-    temp_output_path.replace(video_path)
+    apply_overlays_to_video_file(
+        video_path,
+        logo_path=logo_path,
+        logo_position_x=position_x,
+        logo_position_y=position_y,
+    )
 
 
 def apply_avatar_to_frame(
@@ -763,16 +756,101 @@ def apply_avatar_to_video_file(
     position_x: float | None = None,
     position_y: float | None = None,
 ) -> None:
-    temp_output_path = video_path.with_name(f"{video_path.stem}.avatar{video_path.suffix}")
+    apply_overlays_to_video_file(
+        video_path,
+        avatar_path=avatar_path,
+        avatar_position=position,
+        avatar_position_x=position_x,
+        avatar_position_y=position_y,
+    )
+
+
+def _build_logo_overlay(
+    frame: Image.Image,
+    logo_path: Path,
+) -> Image.Image:
+    with Image.open(logo_path) as logo_image:
+        logo = logo_image.convert("RGBA")
+
+    target_width = max(int(frame.width * 0.15), 1)
+    scale = min(target_width / max(logo.width, 1), 1.0)
+    logo = logo.resize(
+        (max(LocalVideoProvider._make_even(int(logo.width * scale)), 2), max(LocalVideoProvider._make_even(int(logo.height * scale)), 2)),
+        Image.Resampling.LANCZOS,
+    )
+    alpha = logo.getchannel("A")
+    alpha = alpha.point(lambda value: int(value * 0.7))
+    logo.putalpha(alpha)
+    return logo
+
+
+def _build_avatar_overlay(
+    frame: Image.Image,
+    avatar_path: Path,
+) -> Image.Image:
+    with Image.open(avatar_path) as avatar_image:
+        avatar = avatar_image.convert("RGBA")
+
+    target_width = max(int(frame.width * 0.09), 1)
+    scale = min(target_width / max(avatar.width, 1), 1.0)
+    return avatar.resize(
+        (max(LocalVideoProvider._make_even(int(avatar.width * scale)), 2), max(LocalVideoProvider._make_even(int(avatar.height * scale)), 2)),
+        Image.Resampling.LANCZOS,
+    )
+
+
+def apply_overlays_to_video_file(
+    video_path: Path,
+    *,
+    logo_path: Path | None = None,
+    logo_position_x: float | None = None,
+    logo_position_y: float | None = None,
+    avatar_path: Path | None = None,
+    avatar_position: str | None = None,
+    avatar_position_x: float | None = None,
+    avatar_position_y: float | None = None,
+) -> None:
+    if logo_path is None and avatar_path is None:
+        return
+
+    temp_output_path = video_path.with_name(f"{video_path.stem}.overlay{video_path.suffix}")
     reader = imageio.get_reader(video_path, format="FFMPEG")
     meta = reader.get_meta_data()
     fps = meta.get("fps") or settings.VIDEO_FPS
+
+    prepared_logo: Image.Image | None = None
+    prepared_avatar: Image.Image | None = None
+    logo_dest: tuple[int, int] | None = None
+    avatar_dest: tuple[int, int] | None = None
+
     try:
         with imageio.get_writer(temp_output_path, fps=fps, codec="libx264", format="FFMPEG") as writer:
-            for frame in reader:
-                image = Image.fromarray(frame).convert("RGBA")
-                with_avatar = apply_avatar_to_frame(image, avatar_path, position, position_x, position_y)
-                writer.append_data(np.asarray(with_avatar.convert("RGB")))
+            for frame_data in reader:
+                image = Image.fromarray(frame_data).convert("RGBA")
+                if prepared_logo is None and logo_path is not None:
+                    prepared_logo = _build_logo_overlay(image, logo_path)
+                    margin = 20
+                    logo_dest = _resolve_overlay_free_position(
+                        image,
+                        prepared_logo,
+                        position_x=logo_position_x,
+                        position_y=logo_position_y,
+                        margin=margin,
+                    ) or _resolve_overlay_position(image, prepared_logo, "bottom_right", margin)
+                if prepared_avatar is None and avatar_path is not None:
+                    prepared_avatar = _build_avatar_overlay(image, avatar_path)
+                    avatar_dest = _resolve_overlay_free_position(
+                        image,
+                        prepared_avatar,
+                        position_x=avatar_position_x,
+                        position_y=avatar_position_y,
+                    ) or _resolve_overlay_position(image, prepared_avatar, avatar_position or "bottom_right")
+
+                if prepared_logo is not None and logo_dest is not None:
+                    image.alpha_composite(prepared_logo, dest=logo_dest)
+                if prepared_avatar is not None and avatar_dest is not None:
+                    image.alpha_composite(prepared_avatar, dest=avatar_dest)
+                writer.append_data(np.asarray(image.convert("RGB")))
     finally:
         reader.close()
     temp_output_path.replace(video_path)
@@ -1256,6 +1334,38 @@ def create_profile_card_video(
         rgb_frame = np.asarray(frame.convert("RGB"))
         for _ in range(frame_count):
             writer.append_data(rgb_frame)
+
+
+def append_profile_card_tail_to_video_file(
+    *,
+    video_path: Path,
+    card_data: dict[str, Any],
+    resolution: str,
+    aspect_ratio: str,
+    fps: int,
+    duration_seconds: int = 2,
+) -> None:
+    frame = _draw_profile_card_frame(
+        width=_get_video_canvas_size(resolution, aspect_ratio)[0],
+        height=_get_video_canvas_size(resolution, aspect_ratio)[1],
+        card_data=card_data,
+    )
+    rgb_frame = np.asarray(frame.convert("RGB"))
+    frame_count = max(duration_seconds * fps, 1)
+
+    temp_output_path = video_path.with_name(f"{video_path.stem}.profile{video_path.suffix}")
+    reader = imageio.get_reader(video_path, format="FFMPEG")
+    meta = reader.get_meta_data()
+    input_fps = meta.get("fps") or fps
+    try:
+        with imageio.get_writer(temp_output_path, fps=input_fps, codec="libx264", format="FFMPEG") as writer:
+            for frame_data in reader:
+                writer.append_data(frame_data)
+            for _ in range(frame_count):
+                writer.append_data(rgb_frame)
+    finally:
+        reader.close()
+    temp_output_path.replace(video_path)
 
 
 def render_profile_card_preview_bytes(

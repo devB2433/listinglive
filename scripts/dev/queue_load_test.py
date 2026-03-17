@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from backend.core.config import settings
 from backend.core.database import AsyncSessionLocal
+from backend.core.redis_client import get_redis
 from backend.core.scene_templates import SCENE_TEMPLATE_CATEGORY_SHORT
 from backend.models.quota import QuotaPackage
 from backend.models.scene_template import SceneTemplate
@@ -171,10 +172,18 @@ async def get_pending_reserved(db, user_id) -> int:
 async def collect_metrics(task_ids: Sequence[UUID], poll_interval: float, timeout: int) -> list[TaskMetrics]:
     started_at = time.perf_counter()
     last_reported = -1
+    max_queue_lengths = {"video-io": 0, "video-cpu": 0, "video-standard": 0, "video-flex": 0}
     while True:
         async with AsyncSessionLocal() as db:
             stmt = select(VideoTask).where(VideoTask.id.in_(task_ids)).order_by(VideoTask.created_at.asc())
             tasks = list((await db.execute(stmt)).scalars().all())
+        try:
+            redis = await get_redis()
+            for queue_name in list(max_queue_lengths):
+                queue_size = int(await redis.llen(queue_name))
+                max_queue_lengths[queue_name] = max(max_queue_lengths[queue_name], queue_size)
+        except Exception:
+            pass
 
         completed = sum(1 for task in tasks if task.finished_at is not None)
         if completed != last_reported:
@@ -185,7 +194,7 @@ async def collect_metrics(task_ids: Sequence[UUID], poll_interval: float, timeou
             last_reported = completed
 
         if completed == len(task_ids):
-            return [
+            task_metrics = [
                 TaskMetrics(
                     task_id=str(task.id),
                     status=task.status,
@@ -204,6 +213,8 @@ async def collect_metrics(task_ids: Sequence[UUID], poll_interval: float, timeou
                 )
                 for task in tasks
             ]
+            print(f"max_queue_lengths={max_queue_lengths}")
+            return task_metrics
 
         if time.perf_counter() - started_at > timeout:
             raise TimeoutError(f"Timed out waiting for {len(task_ids)} tasks to finish.")
@@ -234,6 +245,9 @@ async def async_main(args: argparse.Namespace) -> int:
     print(f"queue_wait={build_summary(queue_values)}")
     print(f"processing={build_summary(processing_values)}")
     print(f"total_elapsed={build_summary(total_values)}")
+    if metrics:
+        failure_rate = round((len(failed) / len(metrics)) * 100, 2)
+        print(f"failure_rate_percent={failure_rate}")
     if elapsed > 0:
         print(f"throughput_tasks_per_minute={round((succeeded / elapsed) * 60, 2)}")
 

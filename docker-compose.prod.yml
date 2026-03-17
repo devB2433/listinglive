@@ -101,7 +101,7 @@ services:
       timeout: 10s
       retries: 5
 
-  worker:
+  worker-io:
     build:
       context: .
       dockerfile: Dockerfile
@@ -112,7 +112,31 @@ services:
       TZ: ${CONTAINER_TIMEZONE:-UTC}
       STORAGE_LOCAL_ROOT: /data/storage
       AI_PROVIDER_CONFIG_PATH: /run/listinglive/ai_provider.toml
-    command: celery -A backend.tasks.celery_app worker -l info -Q celery,video-standard,video-flex
+    command: celery -A backend.tasks.celery_app worker -l info -Q celery,video-io,video-standard,video-flex --concurrency=${WORKER_IO_CONCURRENCY:-10} -n listinglive-worker-io@%h
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - ${APP_STORAGE_ROOT:-/opt/listinglive/data/storage}:/data/storage
+      - ${AI_PROVIDER_TOML_PATH:-/opt/listinglive/config/ai_provider.toml}:/run/listinglive/ai_provider.toml:ro
+
+  worker-cpu:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ${APP_ENV_FILE:-/opt/listinglive/config/.env.prod}
+    environment:
+      TZ: ${CONTAINER_TIMEZONE:-UTC}
+      STORAGE_LOCAL_ROOT: /data/storage
+      AI_PROVIDER_CONFIG_PATH: /run/listinglive/ai_provider.toml
+    command: celery -A backend.tasks.celery_app worker -l info -Q video-cpu --concurrency=${WORKER_CPU_CONCURRENCY:-1} -n listinglive-worker-cpu@%h
     depends_on:
       postgres:
         condition: service_healthy

@@ -70,7 +70,7 @@ if [[ ! -d "${ROOT_DIR}/content/media" ]]; then
 fi
 
 log "Building production images"
-compose build frontend api worker beat
+compose build frontend api worker-io worker-cpu beat
 
 log "Starting database and redis"
 compose up -d postgres redis
@@ -81,7 +81,7 @@ log "Running database migrations"
 compose run --rm api alembic upgrade head
 
 log "Starting application services"
-compose up -d api worker beat frontend reverse-proxy
+compose up -d api worker-io worker-cpu beat frontend reverse-proxy
 
 wait_for_service api 60 2
 wait_for_service frontend 60 2

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 from fastapi import UploadFile
@@ -75,9 +75,8 @@ from backend.services.video_provider import (
     GeneratedVideo,
     ProviderTaskSnapshot,
     SubmittedVideoTask,
-    apply_avatar_to_video_file,
-    apply_logo_to_video_file,
-    create_profile_card_video,
+    append_profile_card_tail_to_video_file,
+    apply_overlays_to_video_file,
     get_video_provider,
     render_profile_card_preview_bytes,
 )
@@ -127,9 +126,11 @@ FLEX_SUBMIT_RETRYABLE_TASK_STATUSES = (
 STALE_VIDEO_TASK_STATUSES = (
     VIDEO_TASK_STATUS_PROCESSING,
     VIDEO_TASK_STATUS_MERGING,
+    VIDEO_TASK_STATUS_FINALIZING,
 )
 PROVIDER_QUEUE_LOCK_KEY = "video_provider:queue_claim_lock"
 TASK_EXECUTION_LOCK_PREFIX = "video_task:execution"
+LONG_MERGE_SEMAPHORE_KEY = "video_long_merge:semaphore"
 TASK_ERROR_SOURCE_VALIDATION = "validation"
 TASK_ERROR_SOURCE_QUEUE = "queue"
 TASK_ERROR_SOURCE_PROVIDER = "provider"
@@ -2260,60 +2261,43 @@ def build_download_url(task: VideoTask) -> str | None:
 
 
 async def apply_task_video_overlays(task: VideoTask, output_path: Path) -> None:
+    logo_path: Path | None = None
+    avatar_path: Path | None = None
     if task.logo_key:
-        logo_path = get_local_path(task.logo_key)
-        if logo_path.exists():
-            await asyncio.to_thread(
-                apply_logo_to_video_file,
-                output_path,
-                logo_path,
-                task.logo_position_x,
-                task.logo_position_y,
-            )
+        candidate = get_local_path(task.logo_key)
+        if candidate.exists():
+            logo_path = candidate
     if task.avatar_key and task.avatar_position:
-        avatar_path = get_local_path(task.avatar_key)
-        if avatar_path.exists():
-            await asyncio.to_thread(
-                apply_avatar_to_video_file,
-                output_path,
-                avatar_path,
-                task.avatar_position,
-                task.avatar_position_x,
-                task.avatar_position_y,
-            )
+        candidate = get_local_path(task.avatar_key)
+        if candidate.exists():
+            avatar_path = candidate
+    if logo_path is None and avatar_path is None:
+        return
+    await asyncio.to_thread(
+        apply_overlays_to_video_file,
+        output_path,
+        logo_path=logo_path,
+        logo_position_x=task.logo_position_x,
+        logo_position_y=task.logo_position_y,
+        avatar_path=avatar_path,
+        avatar_position=task.avatar_position,
+        avatar_position_x=task.avatar_position_x,
+        avatar_position_y=task.avatar_position_y,
+    )
 
 
 async def append_profile_card_to_video(task: VideoTask, output_path: Path) -> None:
     if not task.profile_card_data:
         return
-
-    ending_key = create_output_key()
-    ending_path = get_local_path(ending_key)
-    merged_path = create_temporary_output_path(output_path)
-    try:
-        await asyncio.to_thread(
-            create_profile_card_video,
-            output_path=ending_path,
-            card_data=task.profile_card_data,
-            resolution=task.resolution,
-            aspect_ratio=task.aspect_ratio,
-            fps=settings.VIDEO_FPS,
-            duration_seconds=2,
-        )
-        await asyncio.to_thread(
-            merge_segment_videos,
-            [output_path, ending_path],
-            merged_path,
-            fps=settings.VIDEO_FPS,
-        )
-        merged_path.replace(output_path)
-    finally:
-        safe_delete_storage_key_task = safe_delete_storage_key(ending_key)
-        try:
-            await safe_delete_storage_key_task
-        except Exception:
-            logger.warning("Failed to delete temporary profile card clip: %s", ending_key, exc_info=True)
-        safe_delete_local_path(merged_path)
+    await asyncio.to_thread(
+        append_profile_card_tail_to_video_file,
+        video_path=output_path,
+        card_data=task.profile_card_data,
+        resolution=task.resolution,
+        aspect_ratio=task.aspect_ratio,
+        fps=settings.VIDEO_FPS,
+        duration_seconds=2,
+    )
 
 
 async def submit_flex_short_video_task(task_id: UUID | str) -> None:
@@ -2558,6 +2542,107 @@ async def finalize_flex_short_video_task(task_id: UUID | str) -> None:
                 safe_delete_local_path(output_path)
 
 
+@asynccontextmanager
+async def hold_long_merge_semaphore(task_id: UUID) -> None:
+    limit = max(settings.VIDEO_LONG_MERGE_CONCURRENCY_LIMIT, 1)
+    wait_seconds = max(settings.VIDEO_LONG_MERGE_WAIT_SECONDS, 30)
+    ttl_seconds = max(settings.VIDEO_LONG_MERGE_LOCK_TTL_SECONDS, wait_seconds + 60)
+    token = uuid4().hex
+    acquired = False
+    acquire_script = """
+local key = KEYS[1]
+local limit = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[2])
+local token = ARGV[3]
+local current = tonumber(redis.call('GET', key) or '0')
+if current < limit then
+  redis.call('INCR', key)
+  redis.call('EXPIRE', key, ttl)
+  redis.call('SADD', key .. ':holders', token)
+  redis.call('EXPIRE', key .. ':holders', ttl)
+  return 1
+end
+return 0
+"""
+    release_script = """
+local key = KEYS[1]
+local token = ARGV[1]
+if redis.call('SREM', key .. ':holders', token) == 1 then
+  local current = tonumber(redis.call('GET', key) or '0')
+  if current <= 1 then
+    redis.call('DEL', key)
+    redis.call('DEL', key .. ':holders')
+  else
+    redis.call('DECR', key)
+  end
+end
+return 1
+"""
+
+    try:
+        redis = await get_redis()
+        deadline = asyncio.get_running_loop().time() + wait_seconds
+        while True:
+            acquired = bool(await redis.eval(acquire_script, 1, LONG_MERGE_SEMAPHORE_KEY, limit, ttl_seconds, token))
+            if acquired:
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                raise TimeoutError(f"Long video merge wait timeout: {task_id}")
+            await asyncio.sleep(1)
+        yield
+    finally:
+        if acquired:
+            try:
+                redis = await get_redis()
+                await redis.eval(release_script, 1, LONG_MERGE_SEMAPHORE_KEY, token)
+            except Exception:
+                logger.warning("Failed to release long-merge semaphore for %s.", task_id, exc_info=True)
+
+
+async def finalize_standard_short_video_task(task_id: UUID | str) -> None:
+    if isinstance(task_id, str):
+        task_id = UUID(task_id)
+    async with AsyncSessionLocal() as db:
+        task = await db.get(VideoTask, task_id)
+        if task is None or task.task_type != VIDEO_TASK_TYPE_SHORT or is_flex_task(task):
+            return
+        async with hold_task_execution_lock(task) as acquired:
+            if not acquired:
+                return
+            task = await db.get(VideoTask, task_id)
+            if task is None or task.status in {VIDEO_TASK_STATUS_SUCCEEDED, VIDEO_TASK_STATUS_FAILED}:
+                return
+            if not task.video_key:
+                _, cleanup_keys = await fail_video_task(db, task_id, "videos.provider.missingVideoUrl", refund_quota_on_failure=True)
+                await db.commit()
+                await cleanup_storage_keys_best_effort(cleanup_keys)
+                return
+
+            output_path = get_local_path(task.video_key)
+            if not output_path.exists():
+                _, cleanup_keys = await fail_video_task(db, task_id, "videos.storage.fileMissing", refund_quota_on_failure=True)
+                await db.commit()
+                await cleanup_storage_keys_best_effort(cleanup_keys)
+                return
+            try:
+                task.status = VIDEO_TASK_STATUS_FINALIZING
+                clear_task_error_state(task)
+                await db.commit()
+                await db.refresh(task)
+                await apply_task_video_overlays(task, output_path)
+                await append_profile_card_to_video(task, output_path)
+                await settle_task_quota_charge(db, task)
+                task.status = VIDEO_TASK_STATUS_SUCCEEDED
+                task.finished_at = datetime.now(timezone.utc)
+                task.expires_at = datetime.now(timezone.utc) + timedelta(days=await get_storage_days_for_user(db, task.user_id))
+                await db.commit()
+            except Exception as exc:
+                await db.rollback()
+                _, cleanup_keys = await fail_video_task(db, task_id, exc, refund_quota_on_failure=True)
+                await db.commit()
+                await cleanup_storage_keys_best_effort(cleanup_keys)
+
+
 async def process_short_video_task(task_id: UUID | str) -> None:
     if isinstance(task_id, str):
         task_id = UUID(task_id)
@@ -2599,13 +2684,12 @@ async def process_short_video_task(task_id: UUID | str) -> None:
                 task.provider_last_polled_at = datetime.now(timezone.utc)
                 task.provider_completed_at = datetime.now(timezone.utc)
                 task.next_poll_at = None
-                await apply_task_video_overlays(task, get_local_path(output_key))
-                await append_profile_card_to_video(task, get_local_path(output_key))
-                await settle_task_quota_charge(db, task)
-                task.status = VIDEO_TASK_STATUS_SUCCEEDED
-                task.finished_at = datetime.now(timezone.utc)
-                task.expires_at = datetime.now(timezone.utc) + timedelta(days=await get_storage_days_for_user(db, task.user_id))
+                task.status = VIDEO_TASK_STATUS_FINALIZING
+                task.finished_at = None
                 await db.commit()
+                from backend.tasks.video import finalize_standard_short_video_task_job
+
+                await enqueue_video_task_or_fail(db, task=task, enqueue_fn=finalize_standard_short_video_task_job.delay)
             except Exception as exc:
                 await db.rollback()
                 _, cleanup_keys = await fail_video_task(db, task_id, exc, refund_quota_on_failure=True)
@@ -2613,6 +2697,95 @@ async def process_short_video_task(task_id: UUID | str) -> None:
                 if output_key:
                     cleanup_keys.append(output_key)
                 await cleanup_storage_keys_best_effort(cleanup_keys)
+
+
+async def finalize_long_video_task_cpu(task_id: UUID | str) -> None:
+    if isinstance(task_id, str):
+        task_id = UUID(task_id)
+    async with AsyncSessionLocal() as db:
+        task = await db.get(VideoTask, task_id)
+        if task is None or task.task_type != VIDEO_TASK_TYPE_LONG:
+            return
+        async with hold_task_execution_lock(task) as acquired:
+            if not acquired:
+                return
+            task = await db.get(VideoTask, task_id)
+            if task is None or task.status in {VIDEO_TASK_STATUS_SUCCEEDED, VIDEO_TASK_STATUS_FAILED}:
+                return
+
+            segment_stmt = (
+                select(LongVideoSegment)
+                .where(LongVideoSegment.task_id == task.id)
+                .order_by(LongVideoSegment.sort_order.asc(), LongVideoSegment.created_at.asc())
+            )
+            segments = list((await db.execute(segment_stmt)).scalars().all())
+            if len(segments) < LONG_VIDEO_MIN_IMAGES:
+                _, cleanup_keys = await fail_video_task(db, task_id, "videos.long.invalidSegments", refund_quota_on_failure=True)
+                await db.commit()
+                await cleanup_storage_keys_best_effort(cleanup_keys)
+                return
+
+            provider_details = dict((task.provider_task_ids or {}).get("segments") or {})
+            segment_keys: list[str] = []
+            for segment in segments:
+                if segment.status != LONG_VIDEO_SEGMENT_STATUS_SUCCEEDED or not segment.segment_video_key:
+                    return
+                segment_keys.append(segment.segment_video_key)
+                if segment.provider_task_id:
+                    provider_details[str(segment.id)] = {"provider_task_id": segment.provider_task_id}
+
+            final_output_key: str | None = None
+            temp_output_path: Path | None = None
+            try:
+                task.status = VIDEO_TASK_STATUS_MERGING
+                clear_task_error_state(task)
+                await heartbeat_active_video_task(db, task)
+                async with hold_long_merge_semaphore(task.id):
+                    final_output_key = create_output_key()
+                    final_output_path = get_local_path(final_output_key)
+                    temp_output_path = create_temporary_output_path(final_output_path)
+                    await asyncio.wait_for(
+                        asyncio.to_thread(
+                            merge_segment_videos,
+                            [get_local_path(key) for key in segment_keys],
+                            temp_output_path,
+                            fps=settings.VIDEO_FPS,
+                        ),
+                        timeout=settings.VIDEO_MERGE_TIMEOUT_SECONDS,
+                    )
+                    temp_output_path.replace(final_output_path)
+                    await apply_task_video_overlays(task, final_output_path)
+                    await append_profile_card_to_video(task, final_output_path)
+
+                task.video_key = final_output_key
+                await settle_task_quota_charge(db, task)
+                task.status = VIDEO_TASK_STATUS_SUCCEEDED
+                task.finished_at = datetime.now(timezone.utc)
+                task.expires_at = datetime.now(timezone.utc) + timedelta(days=await get_storage_days_for_user(db, task.user_id))
+                task.provider_task_ids = {
+                    **(task.provider_task_ids or {}),
+                    "segment_count": len(segments),
+                    "completed_segments": len(segments),
+                    "segments": provider_details,
+                }
+                await db.commit()
+                await cleanup_storage_keys_best_effort(segment_keys)
+            except Exception as exc:
+                await db.rollback()
+                _, cleanup_keys = await fail_video_task(
+                    db,
+                    task_id,
+                    exc,
+                    refund_quota_on_failure=True,
+                    preserve_successful_long_segments=True,
+                    fallback_code="videos.merge.failed",
+                    source_hint=TASK_ERROR_SOURCE_MERGE,
+                )
+                await db.commit()
+                if final_output_key:
+                    cleanup_keys.append(final_output_key)
+                await cleanup_storage_keys_best_effort(cleanup_keys)
+                safe_delete_local_path(temp_output_path)
 
 
 async def process_long_video_task(task_id: UUID | str) -> None:
@@ -2635,9 +2808,6 @@ async def process_long_video_task(task_id: UUID | str) -> None:
             }:
                 return
 
-            segment_keys: list[str] = []
-            final_output_key: str | None = None
-            temp_output_path: Path | None = None
             try:
                 segment_stmt = (
                     select(LongVideoSegment)
@@ -2654,7 +2824,6 @@ async def process_long_video_task(task_id: UUID | str) -> None:
                 for segment in segments:
                     segment_id = segment.id
                     if segment.status == LONG_VIDEO_SEGMENT_STATUS_SUCCEEDED and segment.segment_video_key:
-                        segment_keys.append(segment.segment_video_key)
                         completed_segments += 1
                         if segment.provider_task_id:
                             provider_details[str(segment_id)] = {"provider_task_id": segment.provider_task_id}
@@ -2734,7 +2903,6 @@ async def process_long_video_task(task_id: UUID | str) -> None:
                     segment.status = LONG_VIDEO_SEGMENT_STATUS_SUCCEEDED
                     clear_segment_error_state(segment)
                     segment.finished_at = datetime.now(timezone.utc)
-                    segment_keys.append(output_key)
                     completed_segments += 1
                     provider_details[str(segment_id)] = generated.provider_task_ids
                     task.provider_name = generated.provider_name
@@ -2745,31 +2913,8 @@ async def process_long_video_task(task_id: UUID | str) -> None:
                     }
                     await db.commit()
 
-                task.status = VIDEO_TASK_STATUS_MERGING
+                task.status = VIDEO_TASK_STATUS_FINALIZING
                 clear_task_error_state(task)
-                await heartbeat_active_video_task(db, task)
-
-                final_output_key = create_output_key()
-                final_output_path = get_local_path(final_output_key)
-                temp_output_path = create_temporary_output_path(final_output_path)
-                await asyncio.wait_for(
-                    asyncio.to_thread(
-                        merge_segment_videos,
-                        [get_local_path(key) for key in segment_keys],
-                        temp_output_path,
-                        fps=settings.VIDEO_FPS,
-                    ),
-                    timeout=settings.VIDEO_MERGE_TIMEOUT_SECONDS,
-                )
-                temp_output_path.replace(final_output_path)
-                await apply_task_video_overlays(task, final_output_path)
-                await append_profile_card_to_video(task, final_output_path)
-
-                task.video_key = final_output_key
-                await settle_task_quota_charge(db, task)
-                task.status = VIDEO_TASK_STATUS_SUCCEEDED
-                task.finished_at = datetime.now(timezone.utc)
-                task.expires_at = datetime.now(timezone.utc) + timedelta(days=await get_storage_days_for_user(db, task.user_id))
                 task.provider_task_ids = {
                     **(task.provider_task_ids or {}),
                     "segment_count": len(segments),
@@ -2777,7 +2922,9 @@ async def process_long_video_task(task_id: UUID | str) -> None:
                     "segments": provider_details,
                 }
                 await db.commit()
-                await cleanup_storage_keys_best_effort(segment_keys)
+                from backend.tasks.video import finalize_long_video_task_cpu_job
+
+                await enqueue_video_task_or_fail(db, task=task, enqueue_fn=finalize_long_video_task_cpu_job.delay)
             except Exception as exc:
                 await db.rollback()
                 _, cleanup_keys = await fail_video_task(
@@ -2790,10 +2937,7 @@ async def process_long_video_task(task_id: UUID | str) -> None:
                     source_hint=TASK_ERROR_SOURCE_MERGE,
                 )
                 await db.commit()
-                if final_output_key:
-                    cleanup_keys.append(final_output_key)
                 await cleanup_storage_keys_best_effort(cleanup_keys)
-                safe_delete_local_path(temp_output_path)
 
 
 async def generate_video_output(

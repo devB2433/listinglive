@@ -21,11 +21,13 @@ celery_app.conf.update(
     task_track_started=True,
     worker_prefetch_multiplier=1,
     task_routes={
-        "video.process_short_video_task": {"queue": "video-standard"},
-        "video.process_long_video_task": {"queue": "video-standard"},
-        "video.submit_flex_short_video_task": {"queue": "video-flex"},
-        "video.poll_flex_tasks": {"queue": "video-flex"},
-        "video.finalize_flex_short_video_task": {"queue": "video-flex"},
+        "video.process_short_video_task": {"queue": "video-io"},
+        "video.process_long_video_task": {"queue": "video-io"},
+        "video.submit_flex_short_video_task": {"queue": "video-io"},
+        "video.poll_flex_tasks": {"queue": "video-io"},
+        "video.finalize_flex_short_video_task": {"queue": "video-cpu"},
+        "video.finalize_standard_short_video_task": {"queue": "video-cpu"},
+        "video.finalize_long_video_task_cpu": {"queue": "video-cpu"},
     },
 )
 

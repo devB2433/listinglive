@@ -87,9 +87,9 @@ for ((i=1; i<=samples; i++)); do
   mem_pct=$(mem_used_pct)
 
   ffmpeg_cpu=$(sum_cpu_by_pattern "[f]fmpeg")
-  celery_cpu=$(sum_cpu_by_pattern "celery|backend\\.tasks\\.celery_app")
+  celery_cpu=$(sum_cpu_by_pattern "celery|backend[.]tasks[.]celery_app")
   ffmpeg_cnt=$(count_by_pattern "[f]fmpeg")
-  celery_cnt=$(count_by_pattern "celery|backend\\.tasks\\.celery_app")
+  celery_cnt=$(count_by_pattern "celery|backend[.]tasks[.]celery_app")
   top_line=$(top_proc_line)
 
   ts=$(date +"%F %T")

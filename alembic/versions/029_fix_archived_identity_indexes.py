@@ -1,6 +1,6 @@
 """fix archived identity indexes
 
-Revision ID: 029_fix_archived_identity_indexes
+Revision ID: 029_fix_archived_indexes
 Revises: 028_archive_users
 Create Date: 2026-03-06
 """
@@ -11,7 +11,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = "029_fix_archived_identity_indexes"
+revision: str = "029_fix_archived_indexes"
 down_revision: Union[str, None] = "028_archive_users"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

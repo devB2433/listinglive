@@ -445,9 +445,10 @@ LISTINGLIVE_ENV_FILE=/opt/listinglive/config/.env.prod ./scripts/prod/deploy.sh
 4. 构建生产镜像
 5. 启动 `postgres` 和 `redis`
 6. 执行 `alembic upgrade head`
-7. 启动 `api`、`worker-io`、`worker-cpu`、`beat`、`frontend`、`reverse-proxy`
-8. 执行健康检查
-9. 写入部署状态，供回滚使用
+7. 自动执行 Stripe price 映射校验与同步（默认不允许空映射）
+8. 启动 `api`、`worker-io`、`worker-cpu`、`beat`、`frontend`、`reverse-proxy`
+9. 执行健康检查
+10. 写入部署状态，供回滚使用
 
 ## 9. 一键更新
 
@@ -473,6 +474,7 @@ cd /opt/listinglive/app
 bash ./scripts/prod/update.sh --skip-backup
 bash ./scripts/prod/update.sh --ref <git-ref>
 bash ./scripts/prod/update.sh --env-file /opt/listinglive/config/.env.prod --skip-backup
+bash ./scripts/prod/update.sh --skip-stripe-sync
 ```
 
 说明：

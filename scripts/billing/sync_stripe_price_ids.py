@@ -27,6 +27,8 @@ REPO_CONFIG_PATH = PROJECT_ROOT / "config" / "stripe_price_ids.local.json"
 PROD_HOST_CONFIG_PATH = Path("/opt/listinglive/config/stripe_price_ids.local.json")
 CONTAINER_CONFIG_PATH = Path("/run/listinglive/config/stripe_price_ids.local.json")
 APP_CONFIG_PATH = Path("/opt/listinglive/app/config/stripe_price_ids.local.json")
+REQUIRED_SUBSCRIPTION_KEYS = ("basic", "pro", "ultimate")
+REQUIRED_QUOTA_PACKAGE_KEYS = ("pack_10", "pack_50", "pack_150")
 
 
 def parse_args() -> argparse.Namespace:
@@ -74,7 +76,29 @@ def load_mapping(path: Path) -> dict:
         raise ValueError("Mapping file must contain a 'subscriptions' object.")
     if not isinstance(payload.get("quota_packages"), dict):
         raise ValueError("Mapping file must contain a 'quota_packages' object.")
+    _validate_required_mapping_entries(payload)
     return payload
+
+
+def _validate_required_mapping_entries(payload: dict) -> None:
+    subscriptions = payload.get("subscriptions", {})
+    quota_packages = payload.get("quota_packages", {})
+
+    missing_subscriptions = [key for key in REQUIRED_SUBSCRIPTION_KEYS if key not in subscriptions]
+    missing_packages = [key for key in REQUIRED_QUOTA_PACKAGE_KEYS if key not in quota_packages]
+
+    if missing_subscriptions:
+        raise ValueError(f"Missing subscription mappings: {', '.join(missing_subscriptions)}")
+    if missing_packages:
+        raise ValueError(f"Missing quota package mappings: {', '.join(missing_packages)}")
+
+    empty_subscriptions = [key for key in REQUIRED_SUBSCRIPTION_KEYS if not str(subscriptions.get(key, "")).strip()]
+    empty_packages = [key for key in REQUIRED_QUOTA_PACKAGE_KEYS if not str(quota_packages.get(key, "")).strip()]
+
+    if empty_subscriptions:
+        raise ValueError(f"Empty subscription price IDs: {', '.join(empty_subscriptions)}")
+    if empty_packages:
+        raise ValueError(f"Empty quota package price IDs: {', '.join(empty_packages)}")
 
 
 def sync_subscription_prices(session: Session, mapping: dict[str, str], dry_run: bool) -> int:

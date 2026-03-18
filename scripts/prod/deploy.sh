@@ -8,6 +8,7 @@ source "${SCRIPT_DIR}/lib.sh"
 
 SKIP_PULL=0
 SKIP_BACKUP=0
+SKIP_STRIPE_SYNC=0
 TARGET_REF=""
 
 while [[ $# -gt 0 ]]; do
@@ -18,6 +19,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-backup)
       SKIP_BACKUP=1
+      shift
+      ;;
+    --skip-stripe-sync)
+      SKIP_STRIPE_SYNC=1
       shift
       ;;
     --ref)
@@ -111,6 +116,16 @@ wait_for_service redis 60 2
 
 log "Running database migrations"
 compose run --rm api alembic upgrade head
+
+if [[ "${SKIP_STRIPE_SYNC}" -eq 0 ]]; then
+  log "Validating Stripe price mapping file"
+  compose run --rm api python scripts/billing/sync_stripe_price_ids.py --dry-run
+
+  log "Applying Stripe price mapping sync"
+  compose run --rm api python scripts/billing/sync_stripe_price_ids.py
+else
+  log "Skipping Stripe price mapping sync"
+fi
 
 log "Starting application services"
 compose up -d --remove-orphans "${app_services[@]}"

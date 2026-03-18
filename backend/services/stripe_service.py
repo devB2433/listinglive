@@ -157,7 +157,10 @@ def create_subscription_checkout_session(
         },
         subscription_data=subscription_data,
     )
-    return str(session["url"])
+    url = session.get("url") if isinstance(session, dict) else getattr(session, "url", None)
+    if not url:
+        raise AppError("billing.stripe.checkoutUrlMissing", status_code=502)
+    return str(url)
 
 
 def create_quota_package_checkout_session(
@@ -198,7 +201,10 @@ def create_customer_portal_session(*, customer_id: str) -> str:
         return_url=settings.STRIPE_BILLING_PORTAL_RETURN_URL,
         configuration=configuration_id,
     )
-    return str(session["url"])
+    url = session.get("url") if isinstance(session, dict) else getattr(session, "url", None)
+    if not url:
+        raise AppError("billing.stripe.checkoutUrlMissing", status_code=502)
+    return str(url)
 
 
 def create_subscription_update_confirm_session(

@@ -34,6 +34,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _safe_email_domain(email: str) -> str:
+    normalized = (email or "").strip().lower()
+    if "@" not in normalized:
+        return "invalid"
+    return normalized.split("@", 1)[1]
+
+
 @router.post("/send-code")
 async def send_code(
     body: SendCodeRequest,
@@ -62,6 +69,12 @@ async def register(
             refresh_token=create_refresh_token(user.id),
         )
     except AppError as e:
+        logger.warning(
+            "register rejected code=%s username_len=%s email_domain=%s",
+            e.code,
+            len((body.username or "").strip()),
+            _safe_email_domain(body.email),
+        )
         raise HTTPException(status_code=e.status_code, detail={"code": e.code})
     except Exception as e:
         logger.exception("register error")

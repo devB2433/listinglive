@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from backend.core.api_errors import AppError
 from backend.models.invite_code import InviteCode
 from backend.models.user import User
+from sqlalchemy.exc import IntegrityError
 from backend.services.admin_mfa_service import verify_admin_totp_code
 from backend.services.auth_service import authenticate_user, register, reset_password, send_verify_code, verify_code
 
@@ -80,6 +81,27 @@ class AuthServiceTests(unittest.IsolatedAsyncioTestCase):
         email_stmt = db.execute.await_args_list[2].args[0]
         self.assertIn("lower(trim(coalesce(users.status, ''))) != 'archived'", _compile_sql(username_stmt))
         self.assertIn("lower(trim(coalesce(users.status, ''))) != 'archived'", _compile_sql(email_stmt))
+
+    async def test_register_maps_integrity_error_to_username_exists(self) -> None:
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[_FakeResult(None), _FakeResult(None), _FakeResult(None)])
+        db.flush = AsyncMock(
+            side_effect=IntegrityError(
+                "INSERT INTO users ...",
+                {},
+                Exception('duplicate key value violates unique constraint "ix_users_username"'),
+            )
+        )
+        db.add = Mock()
+        redis = AsyncMock()
+        invite_code = InviteCode(code="INVITE88", owner_user_id=None, created_by_user_id="root-id", is_active=True)
+
+        with patch("backend.services.auth_service.verify_code", AsyncMock(return_value=True)):
+            with patch("backend.services.auth_service.validate_invite_code", AsyncMock(return_value=invite_code)):
+                with self.assertRaises(AppError) as context:
+                    await register(db, redis, "new-user", "Password!1", "new@example.com", "123456", "INVITE88")
+
+        self.assertEqual(context.exception.code, "auth.register.usernameExists")
 
     async def test_register_normalizes_username_and_email_to_lowercase(self) -> None:
         db = AsyncMock()

@@ -121,7 +121,13 @@ export default function BillingPage() {
     setActionError("");
     try {
       const result = await createCustomerPortal(accessToken);
-      await redirectTo(result.portal_url);
+      const url = result?.portal_url;
+      if (!url || typeof url !== "string") {
+        setActionError(translate("dashboard.billing.checkoutUrlMissing"));
+        setPendingAction(null);
+        return;
+      }
+      await redirectTo(url);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : translate("common.requestFailed"));
       setPendingAction(null);
@@ -140,7 +146,13 @@ export default function BillingPage() {
         return;
       }
       const result = await createSubscriptionCheckout(accessToken, planId, strategy);
-      await redirectTo(result.checkout_url);
+      const url = result?.checkout_url;
+      if (!url || typeof url !== "string") {
+        setActionError(translate("dashboard.billing.checkoutUrlMissing"));
+        setPendingAction(null);
+        return;
+      }
+      await redirectTo(url);
     } catch (error) {
       if (
         error instanceof ApiError &&

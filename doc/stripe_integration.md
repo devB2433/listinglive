@@ -153,10 +153,10 @@ STRIPE_BILLING_PORTAL_RETURN_URL=http://127.0.0.1:3001/billing
    }
    ```
 
-3. 执行同步：
+3. 执行同步（默认会自动选择唯一配置来源）：
 
    ```bash
-   python scripts/billing/sync_stripe_price_ids.py --config config/stripe_price_ids.local.json
+   python scripts/billing/sync_stripe_price_ids.py
    ```
 
 4. 可选预检查：加 `--dry-run` 只打印变更不写库。
@@ -170,9 +170,11 @@ STRIPE_BILLING_PORTAL_RETURN_URL=http://127.0.0.1:3001/billing
 生产容器里会把该目录只读挂载到 `/run/listinglive/config`，因此可直接执行：
 
 ```bash
-docker compose --env-file /opt/listinglive/config/.env.prod -f docker-compose.prod.yml exec api python scripts/billing/sync_stripe_price_ids.py --config /run/listinglive/config/stripe_price_ids.local.json --dry-run
-docker compose --env-file /opt/listinglive/config/.env.prod -f docker-compose.prod.yml exec api python scripts/billing/sync_stripe_price_ids.py --config /run/listinglive/config/stripe_price_ids.local.json
+docker compose --env-file /opt/listinglive/config/.env.prod -f docker-compose.prod.yml exec api python scripts/billing/sync_stripe_price_ids.py --dry-run
+docker compose --env-file /opt/listinglive/config/.env.prod -f docker-compose.prod.yml exec api python scripts/billing/sync_stripe_price_ids.py
 ```
+
+注意：`/opt/listinglive/app/config/stripe_price_ids.local.json` 不是生产唯一来源。生产只维护 `/opt/listinglive/config/stripe_price_ids.local.json`。
 
 ### 3.4 Billing Portal
 

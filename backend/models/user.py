@@ -21,8 +21,18 @@ class UserStatus(str, Enum):
 class User(Base):
     __tablename__ = "users"
     __table_args__ = (
-        Index("ix_users_email", "email", unique=True, postgresql_where=text("status <> 'archived'")),
-        Index("ix_users_username", "username", unique=True, postgresql_where=text("status <> 'archived'")),
+        Index(
+            "ix_users_email",
+            "email",
+            unique=True,
+            postgresql_where=text("lower(trim(coalesce(status, ''))) <> 'archived'"),
+        ),
+        Index(
+            "ix_users_username",
+            "username",
+            unique=True,
+            postgresql_where=text("lower(trim(coalesce(status, ''))) <> 'archived'"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

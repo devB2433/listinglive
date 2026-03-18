@@ -11,6 +11,7 @@ import bcrypt
 from jose import JWTError, jwt
 from redis.asyncio import Redis
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.core.api_errors import AppError
@@ -156,7 +157,10 @@ async def register(
         invited_by_user_id=valid_invite_code.owner_user_id,
     )
     db.add(user)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        raise _map_register_integrity_error(exc) from exc
 
     from backend.services.quota_service import (
         ensure_invite_bonus,
@@ -169,6 +173,15 @@ async def register(
     await ensure_signup_pro_trial_subscription(db, user.id)
     await mark_invite_code_used(db, valid_invite_code, used_by_user_id=user.id)
     return user
+
+
+def _map_register_integrity_error(exc: IntegrityError) -> AppError:
+    message = str(exc).lower()
+    if "ix_users_username" in message or "users_username_key" in message:
+        return AppError("auth.register.usernameExists")
+    if "ix_users_email" in message or "users_email_key" in message:
+        return AppError("auth.register.emailExists")
+    return AppError("common.serverError", status_code=500)
 
 
 async def authenticate_user(

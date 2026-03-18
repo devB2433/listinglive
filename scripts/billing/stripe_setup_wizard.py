@@ -269,12 +269,12 @@ def step_sync(env: dict[str, str]) -> None:
 
     if not prompt_yes_no("是否立即执行同步脚本？", default=True):
         print("\n稍后可手动执行：")
-        print("  python scripts/billing/sync_stripe_price_ids.py --config config/stripe_price_ids.local.json")
+        print("  python scripts/billing/sync_stripe_price_ids.py")
         return
 
     import subprocess
 
-    cmd = [sys.executable, "scripts/billing/sync_stripe_price_ids.py", "--config", str(STRIPE_CONFIG_LOCAL)]
+    cmd = [sys.executable, "scripts/billing/sync_stripe_price_ids.py"]
     result = subprocess.run(cmd, cwd=str(ROOT))
     if result.returncode != 0:
         print("\n同步失败，请检查数据库连接和配置文件")

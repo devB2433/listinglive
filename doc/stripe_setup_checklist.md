@@ -9,4 +9,4 @@ Stripe 的完整配置与集成说明已整合到：
 快速入口：
 
 - 交互式向导：`python scripts/billing/stripe_setup_wizard.py`
-- 同步 Price ID：`python scripts/billing/sync_stripe_price_ids.py --config config/stripe_price_ids.local.json`
+- 同步 Price ID：`python scripts/billing/sync_stripe_price_ids.py`

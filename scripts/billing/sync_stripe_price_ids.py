@@ -2,28 +2,65 @@
 把 Stripe Price ID 回填到本地 subscription_plans / quota_package_plans。
 
 用法：
-    python scripts/billing/sync_stripe_price_ids.py --config config/stripe_price_ids.local.json
-    python scripts/billing/sync_stripe_price_ids.py --config config/stripe_price_ids.local.json --dry-run
+    python scripts/billing/sync_stripe_price_ids.py
+    python scripts/billing/sync_stripe_price_ids.py --dry-run
 """
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
+import sys
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.core.config import settings
 from backend.models.quota import QuotaPackagePlan
 from backend.models.subscription import SubscriptionPlan
 
+REPO_CONFIG_PATH = PROJECT_ROOT / "config" / "stripe_price_ids.local.json"
+PROD_HOST_CONFIG_PATH = Path("/opt/listinglive/config/stripe_price_ids.local.json")
+CONTAINER_CONFIG_PATH = Path("/run/listinglive/config/stripe_price_ids.local.json")
+APP_CONFIG_PATH = Path("/opt/listinglive/app/config/stripe_price_ids.local.json")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sync Stripe price IDs into local billing plan tables.")
-    parser.add_argument("--config", required=True, help="Path to the JSON file containing Stripe price mappings.")
+    parser.add_argument(
+        "--config",
+        help=(
+            "Path to the JSON file containing Stripe price mappings. "
+            "If omitted, auto-detects: /run/listinglive/config -> /opt/listinglive/config -> repo config/."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="Validate and print changes without updating the database.")
     return parser.parse_args()
+
+
+def resolve_mapping_path(config_arg: str | None) -> Path:
+    if config_arg:
+        path = Path(config_arg)
+    else:
+        if CONTAINER_CONFIG_PATH.exists():
+            path = CONTAINER_CONFIG_PATH
+        elif PROD_HOST_CONFIG_PATH.exists():
+            path = PROD_HOST_CONFIG_PATH
+        else:
+            path = REPO_CONFIG_PATH
+
+    resolved = path.resolve()
+    if resolved == APP_CONFIG_PATH and (CONTAINER_CONFIG_PATH.exists() or PROD_HOST_CONFIG_PATH.exists()):
+        raise ValueError(
+            "Refusing to use /opt/listinglive/app/config/stripe_price_ids.local.json in production flow. "
+            "Use /run/listinglive/config/stripe_price_ids.local.json (container) "
+            "or /opt/listinglive/config/stripe_price_ids.local.json (host)."
+        )
+    return path
 
 
 def load_mapping(path: Path) -> dict:
@@ -92,7 +129,8 @@ def sync_quota_package_prices(session: Session, mapping: dict[str, str], dry_run
 
 def main() -> None:
     args = parse_args()
-    mapping_path = Path(args.config)
+    mapping_path = resolve_mapping_path(args.config)
+    print(f"Using mapping file: {mapping_path}")
     payload = load_mapping(mapping_path)
 
     engine = create_engine(settings.SYNC_DATABASE_URL, future=True)

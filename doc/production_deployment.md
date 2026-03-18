@@ -128,6 +128,8 @@ sudo ./scripts/prod/init-host.sh
 /run/listinglive/config/stripe_price_ids.local.json
 ```
 
+注意：`/opt/listinglive/app/config/stripe_price_ids.local.json` 仅视为代码仓库示例文件，不应作为生产同步来源。
+
 ### 6.1 主配置文件
 
 需要编辑：

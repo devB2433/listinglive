@@ -21,6 +21,11 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class GoogleLoginRequest(BaseModel):
+    id_token: str
+    invite_code: str | None = None
+
+
 class AdminLoginRequest(BaseModel):
     username_or_email: str
     password: str

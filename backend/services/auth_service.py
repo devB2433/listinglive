@@ -3,6 +3,7 @@
 """
 import random
 import re
+import secrets
 import string
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
@@ -31,6 +32,14 @@ def _normalize_auth_identity(value: str) -> str:
 def _hash_password(password: str) -> str:
     rounds = 4 if settings.DEBUG else 12
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=rounds)).decode("utf-8")
+
+
+def _normalize_username_seed(value: str) -> str:
+    lowered = _normalize_auth_identity(value)
+    sanitized = re.sub(r"[^a-z0-9._-]+", "-", lowered).strip("-._")
+    if not sanitized:
+        return "user"
+    return sanitized[:64]
 
 
 def _exclude_archived_users(stmt):
@@ -175,6 +184,100 @@ async def register(
     return user
 
 
+def _verify_google_oauth_id_token(id_token: str) -> dict:
+    if not settings.GOOGLE_OAUTH_CLIENT_ID:
+        raise AppError("auth.google.notConfigured", status_code=503)
+    try:
+        from google.auth.transport import requests as google_requests
+        from google.oauth2 import id_token as google_id_token
+    except Exception as exc:
+        raise AppError("auth.google.notConfigured", status_code=503) from exc
+    try:
+        payload = google_id_token.verify_oauth2_token(
+            id_token,
+            google_requests.Request(),
+            settings.GOOGLE_OAUTH_CLIENT_ID,
+        )
+    except ValueError as exc:
+        raise AppError("auth.google.invalidToken", status_code=401) from exc
+    if payload.get("iss") not in {"https://accounts.google.com", "accounts.google.com"}:
+        raise AppError("auth.google.invalidToken", status_code=401)
+    return payload
+
+
+async def _generate_unique_username(db: AsyncSession, seed: str) -> str:
+    base = _normalize_username_seed(seed)
+    normalized_username = func.lower(func.trim(func.coalesce(User.username, "")))
+    for index in range(200):
+        suffix = "" if index == 0 else f"-{index + 1}"
+        candidate = f"{base[: max(64 - len(suffix), 1)]}{suffix}"
+        exists = await db.execute(_exclude_archived_users(select(User.id).where(normalized_username == candidate)))
+        if exists.scalar_one_or_none() is None:
+            return candidate
+    return f"user-{secrets.token_hex(4)}"
+
+
+async def authenticate_google_user(
+    db: AsyncSession,
+    *,
+    id_token: str,
+    invite_code: str | None = None,
+) -> User:
+    payload = _verify_google_oauth_id_token(id_token)
+    email = _normalize_auth_identity(str(payload.get("email") or ""))
+    if not email:
+        raise AppError("auth.google.emailUnavailable", status_code=400)
+    if payload.get("email_verified") is not True:
+        raise AppError("auth.google.emailUnavailable", status_code=400)
+
+    normalized_email = func.lower(func.trim(func.coalesce(User.email, "")))
+    user_result = await db.execute(_exclude_archived_users(select(User).where(normalized_email == email)))
+    user = user_result.scalar_one_or_none()
+    if user is not None:
+        if not user.is_active():
+            raise AppError("auth.google.accountUnavailable", status_code=403)
+        user.email_verified = True
+        # Backfill historical accounts that may miss signup bonus package.
+        from backend.services.quota_service import ensure_signup_bonus
+
+        await ensure_signup_bonus(db, user.id)
+        return user
+
+    seed = str(payload.get("name") or email.split("@", 1)[0] or "user")
+    username = await _generate_unique_username(db, seed)
+    normalized_invite_code = normalize_invite_code(invite_code or "")
+    valid_invite_code = None
+    if normalized_invite_code:
+        valid_invite_code = await validate_invite_code(db, normalized_invite_code)
+    user = User(
+        username=username,
+        email=email,
+        password_hash=_hash_password(secrets.token_urlsafe(24)),
+        email_verified=True,
+        invited_by_code=normalized_invite_code or None,
+        invited_by_user_id=valid_invite_code.owner_user_id if valid_invite_code is not None else None,
+    )
+    db.add(user)
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        raise _map_register_integrity_error(exc) from exc
+
+    from backend.services.quota_service import (
+        ensure_invite_bonus,
+        ensure_signup_bonus,
+        ensure_signup_pro_trial_subscription,
+    )
+
+    await ensure_signup_bonus(db, user.id)
+    if valid_invite_code is not None:
+        await ensure_invite_bonus(db, user.id)
+    await ensure_signup_pro_trial_subscription(db, user.id)
+    if valid_invite_code is not None:
+        await mark_invite_code_used(db, valid_invite_code, used_by_user_id=user.id)
+    return user
+
+
 def _map_register_integrity_error(exc: IntegrityError) -> AppError:
     message = str(exc).lower()
     if "ix_users_username" in message or "users_username_key" in message:
@@ -194,12 +297,17 @@ async def authenticate_user(
 ) -> User | None:
     """用户名或邮箱 + 密码 校验"""
     normalized_identity = _normalize_auth_identity(username_or_email)
-    stmt = select(User).where(
-        (func.lower(User.username) == normalized_identity) | (func.lower(User.email) == normalized_identity)
-    )
-    stmt = _exclude_archived_users(stmt)
-    result = await db.execute(stmt)
-    user = result.scalar_one_or_none()
+    normalized_username = func.lower(func.trim(func.coalesce(User.username, "")))
+    normalized_email = func.lower(func.trim(func.coalesce(User.email, "")))
+
+    # Prefer username match first, then fallback to email.
+    # This avoids ambiguity and tolerates historical whitespace/case dirty data.
+    username_stmt = _exclude_archived_users(select(User).where(normalized_username == normalized_identity))
+    user = (await db.execute(username_stmt)).scalar_one_or_none()
+    if user is None:
+        email_stmt = _exclude_archived_users(select(User).where(normalized_email == normalized_identity))
+        user = (await db.execute(email_stmt)).scalar_one_or_none()
+
     if not user or not user.is_active():
         return None
     if user.username == "root":

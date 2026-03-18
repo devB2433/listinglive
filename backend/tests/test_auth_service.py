@@ -7,7 +7,14 @@ from backend.models.invite_code import InviteCode
 from backend.models.user import User
 from sqlalchemy.exc import IntegrityError
 from backend.services.admin_mfa_service import verify_admin_totp_code
-from backend.services.auth_service import authenticate_user, register, reset_password, send_verify_code, verify_code
+from backend.services.auth_service import (
+    authenticate_google_user,
+    authenticate_user,
+    register,
+    reset_password,
+    send_verify_code,
+    verify_code,
+)
 
 
 class _FakeResult:
@@ -156,6 +163,109 @@ class AuthServiceTests(unittest.IsolatedAsyncioTestCase):
                             )
 
         ensure_trial.assert_awaited_once_with(db, user.id)
+
+    async def test_authenticate_google_user_creates_new_user(self) -> None:
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[_FakeResult(None), _FakeResult(None)])
+        db.flush = AsyncMock()
+        db.add = Mock()
+
+        payload = {
+            "email": "newgoogle@example.com",
+            "email_verified": True,
+            "name": "Google User",
+            "iss": "https://accounts.google.com",
+        }
+        with patch("backend.services.auth_service._verify_google_oauth_id_token", return_value=payload):
+            with patch("backend.services.auth_service.validate_invite_code", AsyncMock()) as validate_invite:
+                with patch("backend.services.auth_service.mark_invite_code_used", AsyncMock()) as mark_used:
+                    with patch("backend.services.quota_service.ensure_signup_bonus", AsyncMock()) as ensure_signup:
+                        with patch("backend.services.quota_service.ensure_invite_bonus", AsyncMock()) as ensure_invite_bonus:
+                            with patch("backend.services.quota_service.ensure_signup_pro_trial_subscription", AsyncMock()) as ensure_trial:
+                                user = await authenticate_google_user(db, id_token="mock-token")
+
+        self.assertEqual(user.email, "newgoogle@example.com")
+        self.assertTrue(user.email_verified)
+        self.assertIsNone(user.invited_by_code)
+        ensure_signup.assert_awaited_once_with(db, user.id)
+        ensure_invite_bonus.assert_not_awaited()
+        ensure_trial.assert_awaited_once_with(db, user.id)
+        mark_used.assert_not_awaited()
+        validate_invite.assert_not_awaited()
+
+    async def test_authenticate_google_user_creates_new_user_with_invite_code(self) -> None:
+        db = AsyncMock()
+        db.execute = AsyncMock(side_effect=[_FakeResult(None), _FakeResult(None)])
+        db.flush = AsyncMock()
+        db.add = Mock()
+        invite_code = InviteCode(code="INVITE88", owner_user_id=None, created_by_user_id="root-id", is_active=True)
+
+        payload = {
+            "email": "newgoogle@example.com",
+            "email_verified": True,
+            "name": "Google User",
+            "iss": "https://accounts.google.com",
+        }
+        with patch("backend.services.auth_service._verify_google_oauth_id_token", return_value=payload):
+            with patch("backend.services.auth_service.validate_invite_code", AsyncMock(return_value=invite_code)):
+                with patch("backend.services.auth_service.mark_invite_code_used", AsyncMock()) as mark_used:
+                    with patch("backend.services.quota_service.ensure_signup_bonus", AsyncMock()) as ensure_signup:
+                        with patch("backend.services.quota_service.ensure_invite_bonus", AsyncMock()) as ensure_invite_bonus:
+                            with patch("backend.services.quota_service.ensure_signup_pro_trial_subscription", AsyncMock()) as ensure_trial:
+                                user = await authenticate_google_user(db, id_token="mock-token", invite_code="invite88")
+
+        self.assertEqual(user.email, "newgoogle@example.com")
+        self.assertTrue(user.email_verified)
+        self.assertEqual(user.invited_by_code, "INVITE88")
+        ensure_signup.assert_awaited_once_with(db, user.id)
+        ensure_invite_bonus.assert_awaited_once_with(db, user.id)
+        ensure_trial.assert_awaited_once_with(db, user.id)
+        mark_used.assert_awaited_once_with(db, invite_code, used_by_user_id=user.id)
+
+    async def test_authenticate_google_user_reuses_existing_user(self) -> None:
+        existing = User(
+            username="existing-google",
+            email="google@example.com",
+            password_hash="stored-hash",
+            email_verified=False,
+            preferred_language="en",
+            status="active",
+        )
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=_FakeResult(existing))
+
+        payload = {
+            "email": "google@example.com",
+            "email_verified": True,
+            "iss": "https://accounts.google.com",
+        }
+        with patch("backend.services.auth_service._verify_google_oauth_id_token", return_value=payload):
+            with patch("backend.services.quota_service.ensure_signup_bonus", AsyncMock()) as ensure_signup:
+                user = await authenticate_google_user(db, id_token="mock-token")
+
+        self.assertIs(user, existing)
+        self.assertTrue(existing.email_verified)
+        ensure_signup.assert_awaited_once_with(db, existing.id)
+
+    async def test_authenticate_google_user_rejects_invalid_invite_code_for_new_user(self) -> None:
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=_FakeResult(None))
+
+        payload = {
+            "email": "newgoogle@example.com",
+            "email_verified": True,
+            "name": "Google User",
+            "iss": "https://accounts.google.com",
+        }
+        with patch("backend.services.auth_service._verify_google_oauth_id_token", return_value=payload):
+            with patch(
+                "backend.services.auth_service.validate_invite_code",
+                AsyncMock(side_effect=AppError("auth.register.inviteCodeInvalid")),
+            ):
+                with self.assertRaises(AppError) as context:
+                    await authenticate_google_user(db, id_token="mock-token", invite_code="INVALID88")
+
+        self.assertEqual(context.exception.code, "auth.register.inviteCodeInvalid")
 
     async def test_authenticate_user_matches_case_insensitive_identity(self) -> None:
         db = AsyncMock()

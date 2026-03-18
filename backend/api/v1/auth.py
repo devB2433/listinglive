@@ -11,6 +11,7 @@ from backend.api.deps import get_db, get_redis
 from backend.core.api_errors import AppError
 from backend.core.config import settings
 from backend.schemas.auth import (
+    GoogleLoginRequest,
     LoginRequest,
     RegisterRequest,
     ResetPasswordRequest,
@@ -24,6 +25,7 @@ from backend.services.auth_service import (
     register as do_register,
     reset_password as do_reset_password,
     authenticate_user,
+    authenticate_google_user,
     create_access_token,
     create_refresh_token,
     decode_token,
@@ -97,6 +99,26 @@ async def login(
         raise HTTPException(status_code=500, detail={"code": "common.serverError"})
     if not user:
         raise HTTPException(status_code=401, detail={"code": "auth.login.invalidCredentials"})
+    return TokenResponse(
+        access_token=create_access_token(user.id),
+        refresh_token=create_refresh_token(user.id),
+    )
+
+
+@router.post("/google", response_model=TokenResponse)
+async def google_login(
+    body: GoogleLoginRequest,
+    db: AsyncSession = Depends(get_db),
+) -> TokenResponse:
+    try:
+        user = await authenticate_google_user(db, id_token=body.id_token, invite_code=body.invite_code)
+    except AppError as e:
+        raise HTTPException(status_code=e.status_code, detail={"code": e.code})
+    except Exception:
+        logger.exception("google login error")
+        if settings.DEBUG:
+            raise
+        raise HTTPException(status_code=500, detail={"code": "common.serverError"})
     return TokenResponse(
         access_token=create_access_token(user.id),
         refresh_token=create_refresh_token(user.id),

@@ -1,5 +1,5 @@
 import { getStoredLocale, translateApiError, t } from "@/lib/locale";
-import { getStoredRefreshToken, setStoredTokens, clearStoredTokens } from "@/lib/session";
+import { getStoredAccessToken, getStoredRefreshToken, setStoredTokens, clearStoredTokens } from "@/lib/session";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8003";
 const PREFIX = `${API}/api/v1`;
@@ -423,21 +423,34 @@ function authHeaders(accessToken: string) {
 let _refreshPromise: Promise<string> | null = null;
 
 async function refreshAccessToken(): Promise<string> {
-  const refreshToken = getStoredRefreshToken();
-  if (!refreshToken) {
+  const requestedRefreshToken = getStoredRefreshToken();
+  if (!requestedRefreshToken) {
     handleUnauthorizedState();
     throw new UnauthorizedError("No refresh token");
   }
   const res = await fetch(`${PREFIX}/auth/refresh`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh_token: refreshToken }),
+    body: JSON.stringify({ refresh_token: requestedRefreshToken }),
   });
   if (!res.ok) {
     handleUnauthorizedState();
     throw new UnauthorizedError("Token refresh failed");
   }
   const data = (await res.json()) as { access_token: string; refresh_token: string };
+
+  // Guard against stale-tab race: if another tab/login already rotated
+  // refresh token, this response must not overwrite newer credentials.
+  const currentRefreshToken = getStoredRefreshToken();
+  if (currentRefreshToken && currentRefreshToken !== requestedRefreshToken) {
+    const currentAccessToken = getStoredAccessToken();
+    if (currentAccessToken) {
+      return currentAccessToken;
+    }
+    handleUnauthorizedState();
+    throw new UnauthorizedError("Stale refresh response discarded");
+  }
+
   setStoredTokens(data);
   return data.access_token;
 }
@@ -475,6 +488,19 @@ export async function login(usernameOrEmail: string, password: string) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username_or_email: usernameOrEmail, password }),
+  });
+  if (!res.ok) await parseError(res);
+  return res.json() as Promise<{ access_token: string; refresh_token: string }>;
+}
+
+export async function loginWithGoogle(idToken: string, inviteCode?: string) {
+  const res = await fetch(`${PREFIX}/auth/google`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      id_token: idToken,
+      ...(inviteCode ? { invite_code: inviteCode } : {}),
+    }),
   });
   if (!res.ok) await parseError(res);
   return res.json() as Promise<{ access_token: string; refresh_token: string }>;

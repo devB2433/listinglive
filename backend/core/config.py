@@ -111,6 +111,9 @@ class Settings(BaseSettings):
     # 测试账号（生产应关闭）
     ENABLE_TEST_ACCOUNT: bool = True
 
+    # Google OAuth (Sign-In)
+    GOOGLE_OAUTH_CLIENT_ID: str | None = None
+
     # Stripe
     STRIPE_SECRET_KEY: str | None = None
     STRIPE_PUBLISHABLE_KEY: str | None = None
